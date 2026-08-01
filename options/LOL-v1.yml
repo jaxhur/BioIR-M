@@ -1,0 +1,159 @@
+# 实验名:决定训练结果保存到哪里Single_Composite/experiments/BioIR-LOLv1/
+name: BioIR-LOLv1
+# 使用哪个模型训练类。这里对应 basicsr/models/image_restoration_model.py 里的 ImageRestorationModel，负责训练、验证、保存权重、加载网络等流程。
+# 需要自己写，继承了 BasicSR 的 BaseModel
+# create_model() 会根据 YAML 里的 model_type 去 basicsr/models/*_model.py 里找同名类
+model_type: ImageRestorationModel
+# 图像恢复任务的尺度因子。低光增强输入和输出分辨率一致，所以是 1。超分任务才会是 2、4 这种
+scale: 1
+# 使用 GPU 数量
+num_gpu: 1
+# 随机种子
+manual_seed: 42
+
+
+# 数据集配置
+datasets:
+  # 训练集配置
+  train:
+    # 训练集名字，只用于日志显示，不决定保存路径
+    name: LOLv1-train
+    # 数据集类名：对应 basicsr/data/paired_image_dataset.py，成对图像数据集：低光图 lq 和正常曝光图 gt 一一对应。
+    type: PairedImageDataset
+    # 训练 GT 图和低光输入图路径
+    dataroot_gt: ./datasets/LOL-v1/our485/high
+    dataroot_lq: ./datasets/LOL-v1/our485/low
+    # 文件名模板。'{}' 表示低光图和 GT 图文件名一样
+    filename_tmpl: '{}'
+    # 从普通磁盘文件夹读取图片。不是 LMDB 数据库。
+    io_backend:
+      type: disk
+
+
+    # 训练时随机裁剪的 patch 大小
+    gt_size: 256
+    # 数据增强:随机水平翻转、随机旋转
+    use_flip: true 
+    use_rot: true 
+    # 训练时打乱数据顺序
+    use_shuffle: true
+    # 每张 GPU 用多少个 dataloader worker 读取数据
+    num_worker_per_gpu: 8
+    # 每张 GPU 的 batch size
+    # 32貌似过大了，使用3080ti 12g会爆显存
+    # batchsize=8,patch=128才差不多
+    batch_size_per_gpu: 4
+    # 数据集重复放大倍数。1 表示不额外重复。小数据集有时会设大一点，但通常先保持 1。
+    dataset_enlarge_ratio: 1
+    # ~ 在 YAML 里表示空值 None。这里表示不用额外 prefetch 模式。
+    prefetch_mode: ~
+
+  # 验证集配置
+  val:
+    name: LOLv1-test
+    type: PairedImageDataset
+    dataroot_gt: ./datasets/LOL-v1/eval15/high
+    dataroot_lq: ./datasets/LOL-v1/eval15/low
+    filename_tmpl: '{}'
+    io_backend:
+      type: disk
+
+# 网络结构配置
+network_g:
+  # 网络类型，对应 basicsr/models/archs/BioIR_arch.py 里的 BioIR 类。
+  type: BioIR
+  # 输入输出都是 RGB 三通道图像
+  inp_channels: 3
+  out_channels: 3
+  # 网络基础通道数
+  dim: 32
+  # 不同层级 encoder/decoder 使用的 block 数量，encoder和decoder的 block 数量一样
+  num_blocks: [1,1,2]
+  # 最后细化阶段的 block 数量
+  num_refinement_blocks: 4
+  # FFN 隐藏通道扩张倍数
+  ffn_expansion_factor: 3
+  # 卷积层是否使用 bias
+  bias: false
+
+
+# 路径配置
+# 这些为空，表示默认从头训练
+# resume_state 一般不用手动填，因为训练脚本会自动去 experiments/<name>/training_states/ 找最新 .state 断点恢复。
+path:
+  pretrain_network_g:
+  strict_load_g:
+  resume_state:
+
+
+# 训练配置
+train:
+  # 优化器配置
+  optim_g:
+    type: AdamW
+    lr: !!float 1e-3
+    weight_decay: !!float 1e-3
+    betas: [0.9, 0.9]
+
+  # 学习率调度器：余弦退火，学习率从初始值逐渐降到 eta_min
+  scheduler:
+    type: TrueCosineAnnealingLR
+    T_max: 150000
+    eta_min: !!float 1e-7
+
+  # 总训练迭代数：不是 epoch 数。训练脚本会根据数据集大小和 batch size 自动换算 epoch
+  # total_iter=300000太大了，3080ti要训练两天
+  total_iter: 150000
+  warmup_iter: -1
+
+  # 像素级 L1 损失：约束增强图和 GT 在 RGB 像素上接近
+  pixel_opt:
+    type: L1Loss
+    loss_weight: 1.0
+    reduction: mean
+
+  # 频域损失。把预测图和 GT 做 FFT 后计算 L1，帮助约束全局亮度、颜色分布和频率结构。
+  fft_loss_opt:
+    type: FFTLoss
+    loss_weight: 0.1
+    reduction: mean
+
+# 验证配置
+val:
+  # 验证频率：每 1000 iter 验证一次
+  val_freq: !!float 1e3
+  # 训练中验证时不保存增强图，只算指标
+  save_img: false
+  # 验证指标配置：计算 PSNR 和 SSIM。
+  metrics:
+    psnr:
+      type: calculate_psnr
+      # 不裁边，不转 Y 通道。也就是 RGB 全图评估
+      crop_border: 0
+      test_y_channel: false
+    ssim:
+      type: calculate_ssim
+      crop_border: 0
+      test_y_channel: false
+      ssim3d: false
+
+# 日志配置
+logger:
+  # 每 20 iter 打印一次固定格式训练日志
+  print_freq: 20
+  # 每 1000 iter 保存一次
+  save_checkpoint_freq: !!float 1e3
+  # 启用 TensorBoard 日志：训练后可以用 tensorboard 看 loss 和指标曲线。
+  use_tb_logger: true
+  wandb:
+    project: ~
+    resume_id: ~
+
+
+# 分布式训练参数
+# 单卡用 torchrun --nproc_per_node=1 时基本不用管
+dist_params:
+  # nccl 是 GPU 分布式后端
+  backend: nccl
+  # 进程通信端口
+  port: 29500
