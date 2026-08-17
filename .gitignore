@@ -2,7 +2,7 @@
 __pycache__/
 *.py[codz]
 *$py.class
-
+./实验记录
 # C extensions
 *.so
 
@@ -203,6 +203,9 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# 本地实验过程记录，不纳入版本控制。
+/实验记录/
 
 # Marimo
 marimo/_static/
