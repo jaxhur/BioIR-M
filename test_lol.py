@@ -25,6 +25,13 @@ DATASET_SPLITS = {
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 
+def resolve_output_root(output_root, experiment_name, dataset_name):
+    """返回当前实验和数据集对应的独立测试结果目录。"""
+    if output_root is not None:
+        return Path(output_root).expanduser().resolve()
+    return PROJECT_ROOT / 'test_result' / experiment_name / dataset_name
+
+
 def list_images(folder):
     """返回目录中按相对路径排序的非隐藏图像。"""
     folder = Path(folder)
@@ -228,6 +235,11 @@ def main():
     parser.add_argument('--weights', required=True, help='Generator *.pth.')
     parser.add_argument('--dataset', choices=sorted(DATASET_SPLITS))
     parser.add_argument('--name', default=None, help=argparse.SUPPRESS)
+    parser.add_argument(
+        '--output-root',
+        default=None,
+        help=('测试产物目录；默认使用 '
+              'test_result/<实验名>/<数据集名>。'))
     parser.add_argument('--device', default='auto', choices=['auto', 'cuda', 'cpu'])
     parser.add_argument('--factor', type=int, default=32)
     parser.add_argument('--save_comparison', action='store_true')
@@ -244,8 +256,9 @@ def main():
     legacy_dataset = args.name if args.name in DATASET_SPLITS else None
     dataset_name = args.dataset or legacy_dataset or infer_dataset_name(
         opt['name'])
-    # 测试产物固定落到统一目录，避免不同命令写入不可比较的结果位置。
-    output_root = PROJECT_ROOT / 'test_result' / dataset_name
+    # 默认按实验名隔离测试产物，防止同一服务器切换分支后覆盖历史结果。
+    output_root = resolve_output_root(
+        args.output_root, opt['name'], dataset_name)
     enhanced_dir = output_root / 'enhanced'
     comparison_dir = output_root / 'comparison'
     output_root.mkdir(parents=True, exist_ok=True)
@@ -301,6 +314,7 @@ def main():
     }
     train_split, test_split = DATASET_SPLITS[dataset_name]
     metric_row = {
+        'experiment': opt['name'],
         'dataset': dataset_name,
         'train_split': train_split,
         'test_split': test_split,

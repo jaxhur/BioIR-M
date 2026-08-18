@@ -26,7 +26,7 @@ python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda
 
 
 # 安装basicsr
-cd BioIR-M、
+cd BioIR-M
 python -m pip install -e .
 # 旧版命令：python setup.py develop --no_cuda_ext
 # 验证
@@ -91,6 +91,8 @@ datasets/LOL-v2-Fr/Real_captured/Test/{Low,Normal}
 | LOL-v2-syn  |         4 |       256 |           150,000 |
 | LOL-v2-real |         4 |       256 |           150,000 |
 
+不同方案应使用不同的 YAML `name`。训练产物和测试产物会按该实验名隔离，便于在同一服务器顺序切换分支训练。
+
 ## 训练产物
 
 **周期性输出评价指标、保存模型权重、断点状态**：
@@ -139,7 +141,7 @@ python test_lol.py --opt options/LOL-v2-syn.yml --weights pretrained_models/LOL-
 ## 测试产物
 
 ```text
-test_result/<数据集名>/
+test_result/<实验名>/<数据集名>/
   enhanced/              # 增强后图片
   per_image_metrics.csv  # 每张图的 PSNR/SSIM/LPIPS
   metric.csv             # 全测试集平均指标和 Params/GMACs/GFLOPs
