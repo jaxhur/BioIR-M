@@ -1,0 +1,116 @@
+# DRR-BioIR v0 LOL-v2-real independent training configuration.
+name: DRR-BioIR-v0-LOLv2-real
+model_type: DRRImageRestorationModel
+scale: 1
+num_gpu: 1
+manual_seed: 42
+
+datasets:
+  train:
+    name: LOLv2-real-train
+    type: PairedImageDataset
+    dataroot_gt: ./datasets/LOL-v2/Real_captured/Train/Normal
+    dataroot_lq: ./datasets/LOL-v2/Real_captured/Train/Low
+    filename_tmpl: '{}'
+    io_backend:
+      type: disk
+    gt_size: 256
+    use_flip: true
+    use_rot: true
+    use_shuffle: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 4
+    dataset_enlarge_ratio: 1
+    prefetch_mode: ~
+
+  val:
+    name: LOLv2-real-test
+    type: PairedImageDataset
+    dataroot_gt: ./datasets/LOL-v2/Real_captured/Test/Normal
+    dataroot_lq: ./datasets/LOL-v2/Real_captured/Test/Low
+    filename_tmpl: '{}'
+    io_backend:
+      type: disk
+
+network_g:
+  type: DRRBioIR
+  inp_channels: 3
+  out_channels: 3
+  dim: 32
+  num_blocks: [1, 1, 2]
+  num_refinement_blocks: 4
+  ffn_expansion_factor: 3
+  bias: false
+  prior_hidden_channels: 16
+  input_pad_factor: 32
+  adri_context_patch_sizes: [64, 32, 16]
+  adri_detail_patch_sizes: [16, 8, 4]
+  adri_num_heads: 1
+  adri_scales: [1, 2, 3]
+  use_ra_gdfn: false
+  structure_tau: 0.10
+  log_epsilon: 0.02
+  gate_topk: 16
+
+path:
+  pretrain_network_g:
+  strict_load_g:
+  resume_state:
+
+train:
+  optim_g:
+    type: AdamW
+    lr: !!float 1e-3
+    weight_decay: !!float 1e-3
+    betas: [0.9, 0.9]
+  scheduler:
+    type: TrueCosineAnnealingLR
+    T_max: 150000
+    eta_min: !!float 1e-7
+  total_iter: 150000
+  warmup_iter: -1
+  pixel_opt:
+    type: L1Loss
+    loss_weight: 1.0
+    reduction: mean
+  fft_loss_opt:
+    type: FFTLoss
+    loss_weight: 0.1
+    reduction: mean
+  drr_loss_opt:
+    demand_loss_weight: 0.05
+    reliability_loss_weight: 0.05
+    smooth_l1_beta: 0.10
+    demand_epsilon: 0.05
+    structure_tau: 0.10
+    magnitude_tau: 0.05
+    log_epsilon: 0.02
+    reliability_epsilon: !!float 1e-6
+    edge_weight: 4.0
+    prior_visualization_freq: 1000
+
+val:
+  val_freq: !!float 1e3
+  save_img: false
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 0
+      test_y_channel: false
+    ssim:
+      type: calculate_ssim
+      crop_border: 0
+      test_y_channel: false
+      ssim3d: false
+
+logger:
+  print_freq: 20
+  save_checkpoint_freq: !!float 1e3
+  use_tb_logger: true
+  wandb:
+    project: ~
+    resume_id: ~
+
+dist_params:
+  backend: nccl
+  port: 29500

@@ -218,3 +218,29 @@ sh train.sh options/LOL-v2-syn.yml
 python test_lol.py --opt options/LOL-v2-syn.yml --weights experiments/BioIR-LOLv2-syn/models/latest_G.pth
 ```
 
+# DRR-BioIR v0
+
+DRR-BioIR v0 使用独立配置与独立实验名，不会覆盖原始 BioIR 的权重、日志或测试结果。
+`train.sh` 和 `test_lol.py` 仍分别是唯一训练与测试入口。
+
+```bash
+# LOL-v1
+sh train.sh options/DRR-BioIR-v0-LOL-v1.yml
+python test_lol.py --opt options/DRR-BioIR-v0-LOL-v1.yml \
+  --weights experiments/DRR-BioIR-v0-LOLv1/models/best_G.pth --dataset LOL-v1
+
+# LOL-v2-syn
+sh train.sh options/DRR-BioIR-v0-LOL-v2-syn.yml
+python test_lol.py --opt options/DRR-BioIR-v0-LOL-v2-syn.yml \
+  --weights experiments/DRR-BioIR-v0-LOLv2-syn/models/best_G.pth --dataset LOL-v2-syn
+
+# LOL-v2-real
+sh train.sh options/DRR-BioIR-v0-LOL-v2-real.yml
+python test_lol.py --opt options/DRR-BioIR-v0-LOL-v2-real.yml \
+  --weights experiments/DRR-BioIR-v0-LOLv2-real/models/best_G.pth --dataset LOL-v2-real
+```
+
+v0 默认启用三尺度 DCBC/ADRI，并使用 `L1 + 0.1 FFT + 0.05 L_A + 0.05 L_R`。
+RA-GDFN 已实现但默认关闭；需要参数匹配消融时，将对应 YAML 的
+`network_g.use_ra_gdfn` 改为 `true`。
+
