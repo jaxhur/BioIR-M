@@ -11,8 +11,7 @@
 创建环境：
 
 ```
-git clone https://github.com/jaxhur/BioIR.git
-git clone https://gitee.com/wallcaptain/BioIR.git
+git clone https://github.com/jaxhur/BioIR-M.git
 
 conda remove -n bioir --all -y
 conda create -n bioir python=3.9 -y 
@@ -27,10 +26,11 @@ python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda
 
 
 # 安装basicsr
-cd BioIR/Single_Composite
-# 把 setuptools 降到 64 以下，并确保有 wheel。原因是你当前的新版 setuptools/pip 会用“隔离构建环境”，那个临时环境里看不到你已经安装好的 torch，所以报 No module named 'torch'。
-python -m pip install "setuptools<64" wheel
-python setup.py develop --no_cuda_ext
+cd BioIR-M、
+python -m pip install -e .
+# 旧版命令：python setup.py develop --no_cuda_ext
+# 验证
+python -c "import basicsr; print(basicsr.__file__)"
 ```
 
 
@@ -56,7 +56,7 @@ cp /root/autodl-fs/LOL-v1.zip /root/BioIR/Single_Composite/datasets
 cp /root/autodl-fs/LOL-v2-renamed.zip /root/BioIR/Single_Composite/datasets
 
 # 解压
-cd /root/BioIR/Single_Composite/datasets
+cd /root/BioIR-M/datasets
 unzip LOL-v1.zip -d LOL-v1
 unzip LOL-v2-renamed.zip -d LOL-v2
 

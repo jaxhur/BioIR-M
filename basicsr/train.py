@@ -276,23 +276,31 @@ def validation_data_name(opt):
     return opt['datasets']['val']['name']
 
 
+def format_best_rgb_ssim(best_rgb_ssim):
+    """将最佳 PSNR 对应的 RGB SSIM 格式化为日志字段。"""
+    if best_rgb_ssim is None:
+        return 'unknown'
+    return f'{best_rgb_ssim:.4f}'
+
+
 def run_validation(model, val_loader, opt, current_iter, epoch, total_epochs,
-                   tb_logger, val_logger, best_psnr):
-    """执行验证、输出固定单行日志并在 PSNR 严格提升时保存 best。"""
+                   tb_logger, val_logger, best_psnr, best_rgb_ssim):
+    """执行验证并记录最佳 PSNR 及其对应的 RGB SSIM。"""
     if val_loader is None:
-        return best_psnr
+        return best_psnr, best_rgb_ssim
     rgb2bgr = opt['val'].get('rgb2bgr', True)
     use_image = opt['val'].get('use_image', True)
     metrics = model.validation(
         val_loader, current_iter, tb_logger, opt['val']['save_img'],
         rgb2bgr, use_image)
     if metrics is None:
-        return best_psnr
+        return best_psnr, best_rgb_ssim
     psnr = float(metrics['psnr'])
     ssim = float(metrics['ssim'])
     updated = psnr > best_psnr
     if updated:
         best_psnr = psnr
+        best_rgb_ssim = ssim
         model.save_best()
     val_logger.info(
         f'[{opt["name"]}][VAL] '
@@ -301,18 +309,21 @@ def run_validation(model, val_loader, opt, current_iter, epoch, total_epochs,
         f'[data: name={validation_data_name(opt)}] '
         f'[metric: psnr={psnr:.4f}, rgb_ssim={ssim:.4f}] '
         f'[best: key=psnr, value={best_psnr:.4f}, '
+        f'rgb_ssim={format_best_rgb_ssim(best_rgb_ssim)}, '
         f'updated={"yes" if updated else "no"}]')
-    return best_psnr
+    return best_psnr, best_rgb_ssim
 
 
-def build_extra_state(epoch, step, elapsed_time, best_psnr):
-    """构建随 optimizer/scheduler 一并保存的复现状态。"""
+def build_extra_state(epoch, step, elapsed_time, best_psnr, best_rgb_ssim):
+    """构建包含最佳 PSNR 及其对应 RGB SSIM 的复现状态。"""
     extra_state = {
         'state_format_version': 2,
         'epoch': epoch,
         'step': step,
         'elapsed_time': float(elapsed_time),
         'best_psnr': float(best_psnr),
+        'best_rgb_ssim': (None if best_rgb_ssim is None else
+                          float(best_rgb_ssim)),
     }
     extra_state.update(capture_runtime_state())
     return extra_state
@@ -348,6 +359,9 @@ def main():
         current_iter = int(resume_state['iter'])
         elapsed_offset = float(resume_state.get('elapsed_time', 0.0))
         best_psnr = float(resume_state.get('best_psnr', float('-inf')))
+        best_rgb_ssim = resume_state.get('best_rgb_ssim')
+        if best_rgb_ssim is not None:
+            best_rgb_ssim = float(best_rgb_ssim)
         if resume_state.get('state_format_version') == 2:
             epoch = max(1, int(resume_state['epoch']))
             resume_step = max(0, int(resume_state.get('step', 0)))
@@ -362,7 +376,8 @@ def main():
     else:
         model = create_model(opt)
         epoch, current_iter, resume_step = 1, 0, 0
-        elapsed_offset, best_psnr = 0.0, float('-inf')
+        elapsed_offset, best_psnr, best_rgb_ssim = (
+            0.0, float('-inf'), None)
         if weight_only_path is not None:
             logger.warning(
                 f'Weight-only recovery from {weight_only_path}. Optimizer, '
@@ -444,9 +459,10 @@ def main():
                 opt.get('val') is not None
                 and current_iter % int(opt['val']['val_freq']) == 0)
             if should_validate:
-                best_psnr = run_validation(
+                best_psnr, best_rgb_ssim = run_validation(
                     model, val_loader, opt, current_iter, epoch,
-                    total_epochs, tb_logger, val_logger, best_psnr)
+                    total_epochs, tb_logger, val_logger, best_psnr,
+                    best_rgb_ssim)
                 last_val_iter = current_iter
 
             if current_iter % int(
@@ -455,7 +471,7 @@ def main():
                     f'Saving checkpoint at iter={current_iter:,}.')
                 extra_state = build_extra_state(
                     epoch, current_step, msg_logger.elapsed_seconds(),
-                    best_psnr)
+                    best_psnr, best_rgb_ssim)
                 model.save(epoch, current_iter, extra_state=extra_state)
 
             data_time_start = time.time()
@@ -468,11 +484,12 @@ def main():
             epoch += 1
 
     if opt.get('val') is not None and last_val_iter != current_iter:
-        best_psnr = run_validation(
+        best_psnr, best_rgb_ssim = run_validation(
             model, val_loader, opt, current_iter, epoch, total_epochs,
-            tb_logger, val_logger, best_psnr)
+            tb_logger, val_logger, best_psnr, best_rgb_ssim)
     extra_state = build_extra_state(
-        epoch, current_step, msg_logger.elapsed_seconds(), best_psnr)
+        epoch, current_step, msg_logger.elapsed_seconds(), best_psnr,
+        best_rgb_ssim)
     model.save(epoch, current_iter, extra_state=extra_state)
     logger.info(
         f'End of training: elapsed_seconds={msg_logger.elapsed_seconds():.0f}, '

@@ -6,11 +6,9 @@ import os
 import subprocess
 import sys
 import time
-import torch
-from torch.utils.cpp_extension import (BuildExtension, CppExtension,
-                                       CUDAExtension)
 
 version_file = 'basicsr/version.py'
+BUILD_EXTENSIONS_ENV = 'BASICSR_BUILD_EXTENSIONS'
 
 
 def readme():
@@ -82,12 +80,28 @@ version_info = ({})
 
 
 def get_version():
+    """Read the generated package version without relying on exec locals."""
+    version_namespace = {}
     with open(version_file, 'r') as f:
-        exec(compile(f.read(), version_file, 'exec'))
-    return locals()['__version__']
+        exec(compile(f.read(), version_file, 'exec'), version_namespace)
+    return version_namespace['__version__']
 
 
 def make_cuda_ext(name, module, sources, sources_cuda=None):
+    """Create a PyTorch extension definition when native ops are requested.
+
+    PyTorch is intentionally imported here instead of module scope. Modern pip
+    installs run setup metadata generation in an isolated build environment,
+    where the project's runtime PyTorch installation is unavailable.
+    """
+    try:
+        import torch
+        from torch.utils.cpp_extension import CppExtension, CUDAExtension
+    except ImportError as error:
+        raise RuntimeError(
+            f'PyTorch is required to build native extensions. Install torch '
+            f'first, then set {BUILD_EXTENSIONS_ENV}=1.') from error
+
     if sources_cuda is None:
         sources_cuda = []
     define_macros = []
@@ -121,11 +135,26 @@ def get_requirements(filename='requirements.txt'):
     return requires
 
 
-if __name__ == '__main__':
+def should_build_extensions():
+    """Return whether optional C++/CUDA extensions should be compiled.
+
+    The project defaults to the pure-Python install so editable installs work
+    with recent pip/setuptools versions. Set BASICSR_BUILD_EXTENSIONS=1 to
+    explicitly opt into compiling the optional native operators. The legacy
+    --no_cuda_ext argument remains supported for existing installation scripts.
+    """
     if '--no_cuda_ext' in sys.argv:
-        ext_modules = []
         sys.argv.remove('--no_cuda_ext')
-    else:
+        return False
+    return os.getenv(BUILD_EXTENSIONS_ENV, '0') == '1'
+
+
+if __name__ == '__main__':
+    if should_build_extensions():
+        # Import BuildExtension only for the opt-in native build path, so
+        # metadata generation does not require torch in pip's build sandbox.
+        from torch.utils.cpp_extension import BuildExtension
+
         ext_modules = [
             make_cuda_ext(
                 name='deform_conv_ext',
@@ -146,6 +175,10 @@ if __name__ == '__main__':
                 sources=['src/upfirdn2d.cpp'],
                 sources_cuda=['src/upfirdn2d_kernel.cu']),
         ]
+        cmdclass = {'build_ext': BuildExtension}
+    else:
+        ext_modules = []
+        cmdclass = {}
 
     write_version_py()
     setup(
@@ -172,5 +205,5 @@ if __name__ == '__main__':
         setup_requires=['cython', 'numpy'],
         install_requires=get_requirements(),
         ext_modules=ext_modules,
-        cmdclass={'build_ext': BuildExtension},
+        cmdclass=cmdclass,
         zip_safe=False)
