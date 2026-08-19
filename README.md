@@ -20,7 +20,7 @@ conda activate bioir
 # 安装依赖
 # conda install pytorch=2.4.0 torchvision pytorch-cuda=12.4 -c pytorch -c nvidia -y
 pip install --no-cache-dir torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu124
-pip install opencv-python lmdb tqdm einops scipy scikit-image tensorboard natsort pyiqa joblib lpips ptflops scikit-learn pandas
+pip install opencv-python lmdb tqdm einops scipy scikit-image tensorboard natsort pyiqa joblib lpips ptflops scikit-learn pandas thop
 
 python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
 
@@ -92,6 +92,14 @@ datasets/LOL-v2-Fr/Real_captured/Test/{Low,Normal}
 | LOL-v2-real |         4 |       256 |           150,000 |
 
 不同方案应使用不同的 YAML `name`。训练产物和测试产物会按该实验名隔离，便于在同一服务器顺序切换分支训练。
+
+## Tensorboard
+
+```
+tensorboard --logdir ./BioIR-M/experiments/BioIR-LOLv1/tb_looger --port 6008
+```
+
+
 
 ## 训练产物
 
@@ -179,7 +187,7 @@ python test_lol.py --opt options/LOL-v1.yml --weights experiments/BioIR-LOLv1/mo
 训练
 
 ```
-sh train.sh options/LOL-v2-real.yml
+PYTHONPATH="$PWD" sh train.sh options/LOL-v2-real.yml
 ```
 
 测试
@@ -202,7 +210,7 @@ python test_lol.py --opt options/LOL-v2-real.yml --weights experiments/BioIR-LOL
 训练
 
 ```
-sh train.sh options/LOL-v2-syn.yml
+PYTHONPATH="$PWD" sh train.sh options/LOL-v2-syn.yml
 ```
 
 测试
