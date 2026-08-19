@@ -12,6 +12,8 @@
 
 ```
 git clone https://github.com/jaxhur/BioIR-M.git
+cd BioIR-M
+git switch codex/drr-v0
 
 conda remove -n bioir --all -y
 conda create -n bioir python=3.9 -y 
@@ -20,7 +22,7 @@ conda activate bioir
 # 安装依赖
 # conda install pytorch=2.4.0 torchvision pytorch-cuda=12.4 -c pytorch -c nvidia -y
 pip install --no-cache-dir torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu124
-pip install opencv-python lmdb tqdm einops scipy scikit-image tensorboard natsort pyiqa joblib lpips ptflops scikit-learn pandas
+pip install opencv-python lmdb tqdm einops scipy scikit-image tensorboard natsort pyiqa joblib lpips ptflops scikit-learn pandas thop
 
 python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
 
@@ -114,6 +116,12 @@ experiments/<实验名/
 
 
 
+```
+tensorboard --logdir ./BioIR-M/experiments/DRR-BioIR-v0-LOLv1/tb_looger --port 6006
+```
+
+
+
 # 测试
 
 ## 预训练权重
@@ -155,9 +163,25 @@ test_result/<实验名>/<数据集名>/
 
 训练
 
+- 耗时：15h😅
+
 ```
-sh train.sh options/LOL-v1.yml
+sh train.sh options/DRR-BioIR-v0-LOL-v1.yml
 ```
+
+先验
+
+- `input_lq`：固定的一张低照度训练样本。后面四张都对应它。
+- `demand_target`：训练阶段由 LQ 与 GT 亮度差计算的 \(A^*\)。白色表示“这里确实需要更多提亮/上下文校正”，黑色表示不需要大幅改。
+- `demand_prediction`：预测头仅根据低照度输入预测的 \(A\)。测试时真正使用的是它，不会看 GT。
+- `reliability_target`：由 LQ 与 GT 的结构一致性生成的 \(R^*\)。白色边缘表示“GT 中确实有结构，且低光图里方向、强度也还可信”；黑色既可能是平坦区域，也可能是噪声或丢失的边缘。
+- `reliability_prediction`：模型从低照度图预测的 \(R\)。
+
+$R$还行，因为\(R^*\)能描述结构；但是\(A\)不太行吧，\(A^*\)都是几乎一片白，\(A^*\)就是目标，这样的话\(A\)也不会太好，应该是$A^*$公式出问题了，吧$A^*$公式问题在哪里？
+
+- 应该事先计算\(A^*\)、\(R^*\)看看的
+
+<img src="img/README_img/image-20260818213948085.png" alt="image-20260818213948085" style="zoom:80%;" />
 
 测试
 
@@ -169,7 +193,7 @@ sh train.sh options/LOL-v1.yml
 
 ```
 # LOL-v1
-python test_lol.py --opt options/LOL-v1.yml --weights experiments/BioIR-LOLv1/models/latest_G.pth
+python test_lol.py --opt options/DRR-BioIR-v0-LOL-v1.yml --weights experiments/DRR-BioIR-v0-LOLv1/models/best_G.pth --dataset LOL-v1
 ```
 
 
@@ -179,7 +203,7 @@ python test_lol.py --opt options/LOL-v1.yml --weights experiments/BioIR-LOLv1/mo
 训练
 
 ```
-sh train.sh options/LOL-v2-real.yml
+sh train.sh options/DRR-BioIR-v0-LOL-v2-real.yml
 ```
 
 测试
@@ -191,8 +215,7 @@ sh train.sh options/LOL-v2-real.yml
 - FLOPS(G)：
 
 ```
-# LOL-v2-real
-python test_lol.py --opt options/LOL-v2-real.yml --weights experiments/BioIR-LOLv2-real/models/latest_G.pth
+python test_lol.py --opt options/DRR-BioIR-v0-LOL-v2-real.yml --weights experiments/DRR-BioIR-v0-LOLv2-real/models/best_G.pth --dataset LOL-v2-real
 ```
 
 
@@ -202,7 +225,7 @@ python test_lol.py --opt options/LOL-v2-real.yml --weights experiments/BioIR-LOL
 训练
 
 ```
-sh train.sh options/LOL-v2-syn.yml
+sh train.sh options/DRR-BioIR-v0-LOL-v2-syn.yml
 ```
 
 测试
@@ -214,8 +237,7 @@ sh train.sh options/LOL-v2-syn.yml
 - FLOPS(G)：
 
 ```
-# LOL-v2-syn
-python test_lol.py --opt options/LOL-v2-syn.yml --weights experiments/BioIR-LOLv2-syn/models/latest_G.pth
+python test_lol.py --opt options/DRR-BioIR-v0-LOL-v2-syn.yml --weights experiments/DRR-BioIR-v0-LOLv2-syn/models/best_G.pth --dataset LOL-v2-syn
 ```
 
 # DRR-BioIR v0
@@ -225,19 +247,7 @@ DRR-BioIR v0 使用独立配置与独立实验名，不会覆盖原始 BioIR 的
 
 ```bash
 # LOL-v1
-sh train.sh options/DRR-BioIR-v0-LOL-v1.yml
-python test_lol.py --opt options/DRR-BioIR-v0-LOL-v1.yml \
-  --weights experiments/DRR-BioIR-v0-LOLv1/models/best_G.pth --dataset LOL-v1
 
-# LOL-v2-syn
-sh train.sh options/DRR-BioIR-v0-LOL-v2-syn.yml
-python test_lol.py --opt options/DRR-BioIR-v0-LOL-v2-syn.yml \
-  --weights experiments/DRR-BioIR-v0-LOLv2-syn/models/best_G.pth --dataset LOL-v2-syn
-
-# LOL-v2-real
-sh train.sh options/DRR-BioIR-v0-LOL-v2-real.yml
-python test_lol.py --opt options/DRR-BioIR-v0-LOL-v2-real.yml \
-  --weights experiments/DRR-BioIR-v0-LOLv2-real/models/best_G.pth --dataset LOL-v2-real
 ```
 
 v0 默认启用三尺度 DCBC/ADRI，并使用 `L1 + 0.1 FFT + 0.05 L_A + 0.05 L_R`。

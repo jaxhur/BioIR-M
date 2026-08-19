@@ -124,16 +124,18 @@ class PairedImageDataset(data.Dataset):
                                     bgr2rgb=True,
                                     float32=True)
 
-        aug = random.randint(0, 2)
-        if aug == 1:
-            img_lq = TF.adjust_gamma(img_lq, 1)
-            img_gt = TF.adjust_gamma(img_gt, 1)
+        # 颜色增强仅作用于训练集，保证验证/测试指标基于原始图像且可复现。
+        if self.opt['phase'] == 'train':
+            aug = random.randint(0, 2)
+            if aug == 1:
+                img_lq = TF.adjust_gamma(img_lq, 1)
+                img_gt = TF.adjust_gamma(img_gt, 1)
 
-        aug = random.randint(0, 2)
-        if aug == 1:
-            sat_factor = 1 + (0.2 - 0.4 * np.random.rand())
-            img_lq = TF.adjust_saturation(img_lq, sat_factor)
-            img_gt = TF.adjust_saturation(img_gt, sat_factor)
+            aug = random.randint(0, 2)
+            if aug == 1:
+                sat_factor = 1 + (0.2 - 0.4 * np.random.rand())
+                img_lq = TF.adjust_saturation(img_lq, sat_factor)
+                img_gt = TF.adjust_saturation(img_gt, sat_factor)
         # normalize
         if self.mean is not None or self.std is not None:
             normalize(img_lq, self.mean, self.std, inplace=True)

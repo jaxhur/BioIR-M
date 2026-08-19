@@ -3,6 +3,7 @@ __pycache__/
 *.py[codz]
 *$py.class
 ./实验记录
+测试结果/
 # C extensions
 *.so
 
