@@ -1,5 +1,5 @@
 # DRR-BioIR v0 LOL-v2-syn independent training configuration.
-name: DRR-BioIR-v0-LOLv2-syn
+name: DRR-BioIR-v0-gaussianA-LOLv2-syn
 model_type: DRRImageRestorationModel
 scale: 1
 num_gpu: 1
@@ -81,7 +81,12 @@ train:
     demand_loss_weight: 0.05
     reliability_loss_weight: 0.05
     smooth_l1_beta: 0.10
+    # 可切回 relative_gap 复现原 A*；本实验默认使用 Gaussian 平滑绝对亮度缺口。
+    demand_target_type: gaussian_smoothed_absolute_gap
     demand_epsilon: 0.05
+    demand_gaussian_kernel_size: 15
+    demand_gaussian_sigma: 3.0
+    demand_tau: 0.4942169189453125
     structure_tau: 0.10
     magnitude_tau: 0.05
     log_epsilon: 0.02

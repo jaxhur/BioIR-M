@@ -23,7 +23,19 @@ class DRRImageRestorationModel(ImageRestorationModel):
         self.reliability_loss_weight = float(
             drr_opt.get('reliability_loss_weight', 0.05))
         self.smooth_l1_beta = float(drr_opt.get('smooth_l1_beta', 0.10))
+        self.demand_target_type = str(
+            drr_opt.get('demand_target_type', 'relative_gap'))
         self.demand_epsilon = float(drr_opt.get('demand_epsilon', 0.05))
+        self.demand_gaussian_kernel_size = int(
+            drr_opt.get('demand_gaussian_kernel_size', 15))
+        self.demand_gaussian_sigma = float(
+            drr_opt.get('demand_gaussian_sigma', 3.0))
+        self.demand_tau = float(drr_opt.get('demand_tau', 1.0))
+        if self.demand_target_type not in {
+                'relative_gap', 'gaussian_smoothed_absolute_gap'}:
+            raise ValueError(
+                'demand_target_type 只能是 relative_gap 或 '
+                'gaussian_smoothed_absolute_gap。')
         self.structure_tau = float(drr_opt.get('structure_tau', 0.10))
         self.magnitude_tau = float(drr_opt.get('magnitude_tau', 0.05))
         self.log_epsilon = float(drr_opt.get('log_epsilon', 0.02))
@@ -106,6 +118,10 @@ class DRRImageRestorationModel(ImageRestorationModel):
             self.lq,
             self.gt,
             demand_epsilon=self.demand_epsilon,
+            demand_target_type=self.demand_target_type,
+            demand_gaussian_kernel_size=self.demand_gaussian_kernel_size,
+            demand_gaussian_sigma=self.demand_gaussian_sigma,
+            demand_tau=self.demand_tau,
             structure_tau=self.structure_tau,
             magnitude_tau=self.magnitude_tau,
             log_epsilon=self.log_epsilon,

@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import Dict, Iterable, Tuple
 
 import torch
@@ -41,6 +40,94 @@ def calculate_luminance(image: torch.Tensor) -> torch.Tensor:
         raise ValueError('DRR-BioIR 仅支持形状为 B×3×H×W 的 RGB 输入。')
     weights = image.new_tensor([0.299, 0.587, 0.114]).view(1, 3, 1, 1)
     return (image * weights).sum(dim=1, keepdim=True)
+
+
+def gaussian_smooth_luminance(luminance: torch.Tensor,
+                              kernel_size: int = 15,
+                              sigma: float = 3.0) -> torch.Tensor:
+    """使用固定可分离 Gaussian 核平滑单通道亮度图。
+
+    该算子仅用于构造训练阶段的 A* 监督目标，不含可学习参数。先沿宽度、再沿
+    高度卷积与二维 Gaussian 等价，能减少成对图像纹理差异、暗噪声和微小配准误差。
+
+    Args:
+        luminance: 形状为 ``B×1×H×W`` 的亮度图。
+        kernel_size: 正奇数 Gaussian 核边长。
+        sigma: Gaussian 标准差，单位为像素。
+
+    Returns:
+        与输入同形状的 Gaussian 平滑亮度图。
+    """
+    if luminance.ndim != 4 or luminance.shape[1] != 1:
+        raise ValueError('Gaussian 低通输入必须为 B×1×H×W。')
+    if kernel_size <= 0 or kernel_size % 2 == 0:
+        raise ValueError('Gaussian kernel_size 必须为正奇数。')
+    if sigma <= 0.0:
+        raise ValueError('Gaussian sigma 必须大于 0。')
+
+    radius = kernel_size // 2
+    positions = torch.arange(-radius,
+                             radius + 1,
+                             device=luminance.device,
+                             dtype=luminance.dtype)
+    kernel_1d = torch.exp(-positions.square() / (2.0 * sigma * sigma))
+    kernel_1d = kernel_1d / kernel_1d.sum()
+    horizontal_kernel = kernel_1d.view(1, 1, 1, kernel_size)
+    vertical_kernel = kernel_1d.view(1, 1, kernel_size, 1)
+
+    smoothed = F.conv2d(
+        _safe_reflect_pad(luminance, (radius, radius, 0, 0)),
+        horizontal_kernel)
+    return F.conv2d(_safe_reflect_pad(smoothed, (0, 0, radius, radius)),
+                    vertical_kernel)
+
+
+def build_relative_demand_target(luminance_lq: torch.Tensor,
+                                 luminance_gt: torch.Tensor,
+                                 demand_epsilon: float = 0.05) -> torch.Tensor:
+    """按原相对正向亮度缺口公式构造 A*。
+
+    Args:
+        luminance_lq: 低照度亮度图，形状为 ``B×1×H×W``。
+        luminance_gt: 配对 GT 亮度图，形状同 ``luminance_lq``。
+        demand_epsilon: GT 亮度分母的数值稳定常数。
+
+    Returns:
+        值域为 ``[0,1]`` 的原版相对需求目标。
+    """
+    if demand_epsilon <= 0.0:
+        raise ValueError('relative_gap 的 demand_epsilon 必须大于 0。')
+    positive_gap = (luminance_gt - luminance_lq).clamp_min(0.0)
+    return (positive_gap / (luminance_gt + demand_epsilon)).clamp(0.0, 1.0)
+
+
+def build_gaussian_smoothed_absolute_demand_target(
+        luminance_lq: torch.Tensor,
+        luminance_gt: torch.Tensor,
+        kernel_size: int = 15,
+        sigma: float = 3.0,
+        demand_tau: float = 1.0) -> torch.Tensor:
+    """按 Gaussian 平滑后的绝对正亮度缺口公式构造新版 A*。
+
+    先分别低通 LQ/GT 亮度，再保留 GT 比 LQ 更亮的区域差值，最后用训练集固定
+    ``demand_tau`` 归一化。该定义保留原有的“只接收正向提亮上下文”语义。
+
+    Args:
+        luminance_lq: 低照度亮度图，形状为 ``B×1×H×W``。
+        luminance_gt: 配对 GT 亮度图，形状同 ``luminance_lq``。
+        kernel_size: 固定 Gaussian 低通核边长。
+        sigma: 固定 Gaussian 标准差。
+        demand_tau: 训练集正 Gaussian 平滑亮度缺口的冻结归一化尺度 tau_A。
+
+    Returns:
+        值域为 ``[0,1]`` 的新版 Gaussian 平滑绝对需求目标。
+    """
+    if demand_tau <= 0.0:
+        raise ValueError('gaussian_smoothed_absolute_gap 的 demand_tau 必须大于 0。')
+    smoothed_lq = gaussian_smooth_luminance(luminance_lq, kernel_size, sigma)
+    smoothed_gt = gaussian_smooth_luminance(luminance_gt, kernel_size, sigma)
+    positive_gap = (smoothed_gt - smoothed_lq).clamp_min(0.0)
+    return (positive_gap / demand_tau).clamp(0.0, 1.0)
 
 
 def log_sobel_features(luminance: torch.Tensor,
@@ -92,22 +179,30 @@ def calculate_structure_observation(luminance: torch.Tensor,
 
 
 def build_drr_targets(low_quality: torch.Tensor,
-                      ground_truth: torch.Tensor,
-                      demand_epsilon: float = 0.05,
-                      structure_tau: float = 0.10,
-                      magnitude_tau: float = 0.05,
-                      log_epsilon: float = 0.02,
-                      reliability_epsilon: float = 1e-6) -> Dict[str, torch.Tensor]:
+                       ground_truth: torch.Tensor,
+                       demand_epsilon: float = 0.05,
+                       structure_tau: float = 0.10,
+                       magnitude_tau: float = 0.05,
+                       log_epsilon: float = 0.02,
+                       reliability_epsilon: float = 1e-6,
+                       demand_target_type: str = 'relative_gap',
+                       demand_gaussian_kernel_size: int = 15,
+                       demand_gaussian_sigma: float = 3.0,
+                       demand_tau: float = 1.0) -> Dict[str, torch.Tensor]:
     """由配对 LQ/GT 构造需求、可靠性及结构存在度训练目标。
 
     Args:
         low_quality: 低照度 RGB 图像，形状为 ``B×3×H×W``。
         ground_truth: 配对正常曝光 RGB 图像，形状与 ``low_quality`` 相同。
-        demand_epsilon: 相对正向曝光需求的分母稳定常数。
+        demand_epsilon: 原相对需求公式的分母稳定常数。
         structure_tau: GT 梯度成为明显结构的软阈值。
         magnitude_tau: 两图梯度幅值的一致性容忍尺度。
         log_epsilon: 对数 Sobel 特征的稳定常数。
         reliability_epsilon: 方向余弦分母的稳定常数。
+        demand_target_type: ``relative_gap`` 或 ``gaussian_smoothed_absolute_gap``。
+        demand_gaussian_kernel_size: 新版 A* 的固定 Gaussian 核边长。
+        demand_gaussian_sigma: 新版 A* 的固定 Gaussian 标准差。
+        demand_tau: 新版 A* 使用的冻结归一化尺度 tau_A。
 
     Returns:
         包含 ``demand``、``reliability`` 与 ``edge_presence`` 的字典。
@@ -121,8 +216,20 @@ def build_drr_targets(low_quality: torch.Tensor,
     grad_gt_x, grad_gt_y, magnitude_gt = log_sobel_features(
         luminance_gt, log_epsilon)
 
-    demand = (luminance_gt - luminance_lq).clamp_min(0.0)
-    demand = demand / (luminance_gt + demand_epsilon)
+    if demand_target_type == 'relative_gap':
+        demand = build_relative_demand_target(luminance_lq, luminance_gt,
+                                               demand_epsilon)
+    elif demand_target_type == 'gaussian_smoothed_absolute_gap':
+        demand = build_gaussian_smoothed_absolute_demand_target(
+            luminance_lq,
+            luminance_gt,
+            kernel_size=demand_gaussian_kernel_size,
+            sigma=demand_gaussian_sigma,
+            demand_tau=demand_tau)
+    else:
+        raise ValueError(
+            'demand_target_type 只能是 relative_gap 或 '
+            'gaussian_smoothed_absolute_gap。')
 
     edge_presence = 1.0 - torch.exp(-magnitude_gt / structure_tau)
     magnitude_consistency = torch.exp(
@@ -133,7 +240,7 @@ def build_drr_targets(low_quality: torch.Tensor,
     direction_consistency = direction_consistency.clamp(0.0, 1.0)
     reliability = edge_presence * magnitude_consistency * direction_consistency
     return {
-        'demand': demand.clamp(0.0, 1.0),
+        'demand': demand,
         'reliability': reliability.clamp(0.0, 1.0),
         'edge_presence': edge_presence.clamp(0.0, 1.0)
     }
