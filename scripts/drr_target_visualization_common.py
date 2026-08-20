@@ -515,12 +515,12 @@ def gaussian_kernel_1d(
     return kernel / kernel.sum()
 
 
-def gaussian_low_pass(
+def gaussian_smooth_luminance(
     luminance: torch.Tensor,
     kernel_size: int,
     sigma: float,
 ) -> torch.Tensor:
-    """使用固定、可分离的 Gaussian 低通平滑亮度图。
+    """使用固定、可分离的 Gaussian 核平滑亮度图。
 
     Args:
         luminance: ``B×1×H×W`` 亮度图。
@@ -528,7 +528,7 @@ def gaussian_low_pass(
         sigma: Gaussian 标准差，单位为像素。
 
     Returns:
-        与输入形状一致的低频亮度图。
+        与输入形状一致的 Gaussian 平滑亮度图。
     """
 
     if luminance.ndim != 4 or luminance.shape[1] != 1:
@@ -1169,9 +1169,9 @@ def estimate_positive_quantile(
         for index, pair in enumerate(pairs, start=1):
             lq = load_rgb_tensor(pair.lq_path, device)
             gt = load_rgb_tensor(pair.gt_path, device)
-            luminance_lq = gaussian_low_pass(
+            luminance_lq = gaussian_smooth_luminance(
                 calculate_luminance(lq), kernel_size, sigma)
-            luminance_gt = gaussian_low_pass(
+            luminance_gt = gaussian_smooth_luminance(
                 calculate_luminance(gt), kernel_size, sigma)
             deficit = (luminance_gt - luminance_lq).clamp_min(0.0)
             positive = deficit[deficit > 0.0]

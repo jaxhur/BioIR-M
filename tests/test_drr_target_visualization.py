@@ -19,7 +19,7 @@ from drr_target_visualization_common import (  # noqa: E402
     ReliabilityParameters,
     average_pool_map,
     build_reliability_target,
-    gaussian_low_pass,
+    gaussian_smooth_luminance,
     map_statistics,
     topk_pool_map,
 )
@@ -44,11 +44,12 @@ class DRRTargetVisualizationTest(unittest.TestCase):
         expected = torch.tensor([[[[0.4 / 0.55, 0.0, 0.0]]]])
         torch.testing.assert_close(actual, expected)
 
-    def test_gaussian_low_pass_preserves_constant_luminance(self):
+    def test_gaussian_smoothing_preserves_constant_luminance(self):
         """归一化固定低通不能改变常量亮度场。"""
 
         luminance = torch.full((1, 1, 31, 47), 0.37)
-        smoothed = gaussian_low_pass(luminance, kernel_size=15, sigma=3.0)
+        smoothed = gaussian_smooth_luminance(
+            luminance, kernel_size=15, sigma=3.0)
         torch.testing.assert_close(
             smoothed,
             luminance,

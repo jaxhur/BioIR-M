@@ -1,9 +1,9 @@
-"""使用低频绝对亮度缺口批量生成 LOL 数据集的新版 ``A*`` 与原版 ``R*``。
+"""使用 Gaussian 平滑绝对亮度缺口批量生成 LOL 数据集的新版 ``A*`` 与原版 ``R*``。
 
 新版 ``A*``：
 
-1. 用固定 Gaussian 低通分别平滑 LQ/GT 亮度；
-2. 计算正向低频绝对亮度缺口 ``D_A``；
+1. 用固定 Gaussian 核分别平滑 LQ/GT 亮度；
+2. 计算正向 Gaussian 平滑绝对亮度缺口 ``D_A``；
 3. 仅在对应训练集上统计 ``D_A>0`` 的指定分位数 ``tau_A``；
 4. 使用 ``A* = clamp(D_A / tau_A, 0, 1)``。
 
@@ -28,7 +28,7 @@ from drr_target_visualization_common import (DATASET_SPECS,
                                              add_common_arguments,
                                              build_pairs,
                                              estimate_positive_quantile,
-                                             gaussian_low_pass,
+                                             gaussian_smooth_luminance,
                                              resolve_device,
                                              run_selected_datasets,
                                              selected_specs)
@@ -41,7 +41,7 @@ def build_revised_demand_target(
     sigma: float,
     tau_a: float,
 ) -> torch.Tensor:
-    """按低频绝对亮度缺口与固定训练集尺度构造新版 ``A*``。
+    """按 Gaussian 平滑绝对亮度缺口与固定训练集尺度构造新版 ``A*``。
 
     Args:
         luminance_lq: LQ 亮度，形状 ``B×1×H×W``。
@@ -54,8 +54,8 @@ def build_revised_demand_target(
         范围为 ``[0,1]`` 的新版 ``A*``。
     """
 
-    smoothed_lq = gaussian_low_pass(luminance_lq, kernel_size, sigma)
-    smoothed_gt = gaussian_low_pass(luminance_gt, kernel_size, sigma)
+    smoothed_lq = gaussian_smooth_luminance(luminance_lq, kernel_size, sigma)
+    smoothed_gt = gaussian_smooth_luminance(luminance_gt, kernel_size, sigma)
     absolute_deficit = (smoothed_gt - smoothed_lq).clamp_min(0.0)
     return (absolute_deficit / tau_a).clamp(0.0, 1.0)
 
@@ -68,29 +68,29 @@ def parse_args() -> argparse.Namespace:
     """
 
     parser = argparse.ArgumentParser(
-        description="按低频绝对亮度缺口输出 LOL-v1/LOL-v2 的 A*、R* 与统计。")
+        description="按 Gaussian 平滑绝对亮度缺口输出 LOL-v1/LOL-v2 的 A*、R* 与统计。")
     add_common_arguments(
         parser,
         default_output_root=Path(
             "analysis_artifacts/drr_target_visualization/revised"),
     )
     parser.add_argument(
-        "--low-pass-kernel-size",
+        "--gaussian-kernel-size",
         type=int,
         default=15,
-        help="固定 Gaussian 低通核边长，必须为正奇数，默认 15。",
+        help="固定 Gaussian 核边长，必须为正奇数，默认 15。",
     )
     parser.add_argument(
-        "--low-pass-sigma",
+        "--gaussian-sigma",
         type=float,
         default=3.0,
-        help="固定 Gaussian 核标准差，单位为像素，默认 3.0。",
+        help="固定 Gaussian 平滑标准差，单位为像素，默认 3.0。",
     )
     parser.add_argument(
         "--tau-quantile",
         type=float,
         default=0.90,
-        help="训练集正低频缺口用于 tau_A 的分位数，默认 0.90。",
+        help="训练集正 Gaussian 平滑亮度缺口用于 tau_A 的分位数，默认 0.90。",
     )
     parser.add_argument(
         "--tau-histogram-bins",
@@ -111,10 +111,10 @@ def parse_args() -> argparse.Namespace:
         help="仅调试时限制 tau_A 训练图数量；0 表示完整训练集。",
     )
     args = parser.parse_args()
-    if args.low_pass_kernel_size <= 0 or args.low_pass_kernel_size % 2 == 0:
-        raise ValueError("--low-pass-kernel-size 必须为正奇数。")
-    if args.low_pass_sigma <= 0.0:
-        raise ValueError("--low-pass-sigma 必须大于 0。")
+    if args.gaussian_kernel_size <= 0 or args.gaussian_kernel_size % 2 == 0:
+        raise ValueError("--gaussian-kernel-size 必须为正奇数。")
+    if args.gaussian_sigma <= 0.0:
+        raise ValueError("--gaussian-sigma 必须大于 0。")
     if not 0.0 < args.tau_quantile < 1.0:
         raise ValueError("--tau-quantile 必须位于 (0,1)。")
     if args.tau_histogram_bins < 256:
@@ -153,8 +153,8 @@ def main() -> None:
             tau_a, positive_count = estimate_positive_quantile(
                 pairs=tau_pairs,
                 device=device,
-                kernel_size=args.low_pass_kernel_size,
-                sigma=args.low_pass_sigma,
+                kernel_size=args.gaussian_kernel_size,
+                sigma=args.gaussian_sigma,
                 quantile=args.tau_quantile,
                 histogram_bins=args.tau_histogram_bins,
             )
@@ -165,15 +165,15 @@ def main() -> None:
             tau_source = "manual_override"
         print(f"[tau_A][{spec.name}] tau_A={tau_a:.8f} ({tau_source})")
 
-        kernel_size = int(args.low_pass_kernel_size)
-        sigma = float(args.low_pass_sigma)
+        kernel_size = int(args.gaussian_kernel_size)
+        sigma = float(args.gaussian_sigma)
 
         def builder(
             luminance_lq: torch.Tensor,
             luminance_gt: torch.Tensor,
             dataset_name: str,
-            low_pass_kernel_size: int = kernel_size,
-            low_pass_sigma: float = sigma,
+            gaussian_kernel_size: int = kernel_size,
+            gaussian_sigma: float = sigma,
             fixed_tau_a: float = tau_a,
         ) -> torch.Tensor:
             """使用当前数据集冻结的 tau_A 构造新版目标。"""
@@ -182,16 +182,16 @@ def main() -> None:
             return build_revised_demand_target(
                 luminance_lq=luminance_lq,
                 luminance_gt=luminance_gt,
-                kernel_size=low_pass_kernel_size,
-                sigma=low_pass_sigma,
+                kernel_size=gaussian_kernel_size,
+                sigma=gaussian_sigma,
                 tau_a=fixed_tau_a,
             )
 
         builders[spec.name] = builder
         parameters[spec.name] = {
             "definition": "clip(relu(G(Y_gt)-G(Y_lq))/tau_A,0,1)",
-            "low_pass_kernel_size": kernel_size,
-            "low_pass_sigma": sigma,
+            "gaussian_kernel_size": kernel_size,
+            "gaussian_sigma": sigma,
             "tau_a": tau_a,
             "tau_source": tau_source,
             "tau_quantile": float(args.tau_quantile),
@@ -201,7 +201,7 @@ def main() -> None:
 
     run_selected_datasets(
         args=args,
-        formula_name="revised_low_frequency_absolute_gap",
+        formula_name="revised_gaussian_smoothed_absolute_gap",
         demand_builders=builders,
         formula_parameters=parameters,
     )
