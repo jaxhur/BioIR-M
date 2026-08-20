@@ -8,6 +8,29 @@
 
 # 创建环境
 
+## 一键创建环境与数据集
+
+在 Linux/AutoDL 服务器的项目根目录执行：
+
+```bash
+bash scripts/bootstrap_environment_and_datasets.sh
+```
+
+该命令按照本 README 创建或复用 `bioir`（Python 3.9）环境，安装 PyTorch 2.4.0/CUDA 12.4 与项目依赖，从下方 Google Drive 链接下载 LOL-v1、LOL-v2，解压到当前训练配置使用的 `datasets/LOL-v1`、`datasets/LOL-v2`，并严格校验全部 LQ/GT 相对路径配对。它不会启动训练，也不会默认删除已有环境或数据。
+
+```bash
+# 明确删除并重建已有 bioir 环境。
+bash scripts/bootstrap_environment_and_datasets.sh --recreate-env
+
+# 使用 AutoDL 已缓存的两个 ZIP。
+bash scripts/bootstrap_environment_and_datasets.sh --data-source autodl
+
+# 已手动放好数据时，只校验目录与配对。
+bash scripts/bootstrap_environment_and_datasets.sh --skip-env --skip-data
+```
+
+若现有数据目录校验失败，脚本默认停止并保留原目录；只有明确传入 `--replace-datasets` 才会删除错误目录后重新解压。
+
 创建环境：
 
 ```
@@ -69,14 +92,14 @@ cd ../
 目录结构
 
 ```
-datasets/LOL-v1-Fr/our485/{low,high}
-datasets/LOL-v1-Fr/eval15/{low,high}
+datasets/LOL-v1/our485/{low,high}
+datasets/LOL-v1/eval15/{low,high}
 
-datasets/LOL-v2-Fr/Synthetic/Train/{Low,Normal}
-datasets/LOL-v2-Fr/Synthetic/Test/{Low,Normal}
+datasets/LOL-v2/Synthetic/Train/{Low,Normal}
+datasets/LOL-v2/Synthetic/Test/{Low,Normal}
 
-datasets/LOL-v2-Fr/Real_captured/Train/{Low,Normal}
-datasets/LOL-v2-Fr/Real_captured/Test/{Low,Normal}
+datasets/LOL-v2/Real_captured/Train/{Low,Normal}
+datasets/LOL-v2/Real_captured/Test/{Low,Normal}
 ```
 
 
