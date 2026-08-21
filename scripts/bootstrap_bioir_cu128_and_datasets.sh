@@ -82,7 +82,8 @@ environment_exists() {
 }
 
 run_in_env() {
-  conda run -n "$ENV_NAME" "$@"
+  # 关闭 conda run 的输出捕获，使 pip 下载、解包和报错实时显示在终端。
+  conda run --no-capture-output -n "$ENV_NAME" "$@"
 }
 
 verify_environment() {
