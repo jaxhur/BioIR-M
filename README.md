@@ -8,15 +8,15 @@
 
 # 创建环境
 
-## 一键创建环境与数据集
-
-在 Linux/AutoDL 服务器的项目根目录执行：
+## 一键创建环境与数据集：
 
 ```bash
+git clone https://github.com/jaxhur/BioIR-M.git
+cd BioIR-M
+git switch codex/drr-v0
+
 bash scripts/bootstrap_environment_and_datasets.sh
 ```
-
-该命令按照本 README 创建或复用 `bioir`（Python 3.9）环境，安装 PyTorch 2.4.0/CUDA 12.4 与项目依赖，从下方 Google Drive 链接下载 LOL-v1、LOL-v2，解压到当前训练配置使用的 `datasets/LOL-v1`、`datasets/LOL-v2`，并严格校验全部 LQ/GT 相对路径配对。它不会启动训练，也不会默认删除已有环境或数据。
 
 ```bash
 # 明确删除并重建已有 bioir 环境。
@@ -29,7 +29,7 @@ bash scripts/bootstrap_environment_and_datasets.sh --data-source autodl
 bash scripts/bootstrap_environment_and_datasets.sh --skip-env --skip-data
 ```
 
-若现有数据目录校验失败，脚本默认停止并保留原目录；只有明确传入 `--replace-datasets` 才会删除错误目录后重新解压。
+## 手动创建
 
 创建环境：
 
@@ -60,6 +60,34 @@ python -c "import basicsr; print(basicsr.__file__)"
 
 
 
+兼容5090、4090
+
+```
+git clone https://github.com/jaxhur/BioIR-M.git
+cd BioIR-M
+git switch codex/drr-v0
+
+conda create -n bioir-cu128 python=3.9 -y
+# 强制走官方源
+conda create -n bioir-cu128 python=3.9 -y  --override-channels -c https://repo.anaconda.com/pkgs/main
+conda activate bioir-cu128
+
+# 安装依赖
+# conda install pytorch=2.4.0 torchvision pytorch-cuda=12.4 -c pytorch -c nvidia -y
+python -m pip install --no-cache-dir torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu128
+pip install opencv-python lmdb tqdm einops scipy scikit-image tensorboard natsort pyiqa joblib lpips ptflops scikit-learn pandas thop
+
+
+python -c "import torch; print('torch:', torch.__version__); print('CUDA runtime:', torch.version.cuda); print('available:', torch.cuda.is_available()); print('arch list:', torch.cuda.get_arch_list()); [print(f'gpu{i}: {torch.cuda.get_device_name(i)}, sm_{torch.cuda.get_device_capability(i)[0]}{torch.cuda.get_device_capability(i)[1]}') for i in range(torch.cuda.device_count())]"
+
+# 安装basicsr
+cd BioIR-M
+python -m pip install -e .
+# 旧版命令：python setup.py develop --no_cuda_ext
+# 验证
+python -c "import basicsr; print(basicsr.__file__)"
+```
+
 
 
 # 数据集
@@ -76,12 +104,11 @@ gdown "https://drive.google.com/uc?id=1mAN3ll5wWwt1Xz0C7uio31-NJu-50S8Z"
 # LOL-v2
 gdown "https://drive.google.com/uc?id=1L0UnJg6gZ4Eb7It2EuNxP0L3lQNmKMaP"
 
-# AUtoDL
+# 如果是AUtoDL平台
 cp /root/autodl-fs/LOL-v1.zip /root/BioIR/Single_Composite/datasets
 cp /root/autodl-fs/LOL-v2-renamed.zip /root/BioIR/Single_Composite/datasets
 
 # 解压
-cd /root/BioIR-M/datasets
 unzip LOL-v1.zip -d LOL-v1
 unzip LOL-v2-renamed.zip -d LOL-v2
 
@@ -140,7 +167,8 @@ experiments/<实验名/
 
 
 ```
-tensorboard --logdir ./BioIR-M/experiments/DRR-BioIR-v0-LOLv1/tb_looger --port 6006
+tensorboard --logdir ./BioIR-M/experiments/DRR-BioIR-v0-LOLv1/tb_looger --port 6009
+
 ```
 
 
@@ -186,10 +214,16 @@ test_result/<实验名>/<数据集名>/
 
 训练
 
-- 耗时：15h😅
+- 耗时：
+  - 4090：最多15h、至少13h
+    - 一般都是0.25$，有时能弄到0.22\$，总成本=14\*0.25\*6.8=23.8
+  - 5090
+    - 一般是0.35\$，有时能弄到0.32\$，总成本=23.8/0.35/6.8=10，只要5090上的耗时小于10小时，就使用5090
 
 ```
 sh train.sh options/DRR-BioIR-v0-LOL-v1.yml
+
+tensorboard --logdir ./BioIR-M/experiments/DRR-BioIR-v0-gaussianA-LOLv1/tb_looger --port 6009
 ```
 
 先验
@@ -200,11 +234,7 @@ sh train.sh options/DRR-BioIR-v0-LOL-v1.yml
 - `reliability_target`：由 LQ 与 GT 的结构一致性生成的 \(R^*\)。白色边缘表示“GT 中确实有结构，且低光图里方向、强度也还可信”；黑色既可能是平坦区域，也可能是噪声或丢失的边缘。
 - `reliability_prediction`：模型从低照度图预测的 \(R\)。
 
-$R$还行，因为\(R^*\)能描述结构；但是\(A\)不太行吧，\(A^*\)都是几乎一片白，\(A^*\)就是目标，这样的话\(A\)也不会太好，应该是$A^*$公式出问题了，吧$A^*$公式问题在哪里？
 
-- 应该事先计算\(A^*\)、\(R^*\)看看的
-
-<img src="img/README_img/image-20260818213948085.png" alt="image-20260818213948085" style="zoom:80%;" />
 
 测试
 
@@ -225,8 +255,12 @@ python test_lol.py --opt options/DRR-BioIR-v0-LOL-v1.yml --weights experiments/D
 
 训练
 
+- 耗时
+  - 4090：15h
+
 ```
 sh train.sh options/DRR-BioIR-v0-LOL-v2-real.yml
+tensorboard --logdir ./BioIR-M/experiments/DRR-BioIR-v0-gaussianA-LOLv2-real/tb_looger --port 6009
 ```
 
 测试
@@ -238,7 +272,8 @@ sh train.sh options/DRR-BioIR-v0-LOL-v2-real.yml
 - FLOPS(G)：
 
 ```
-python test_lol.py --opt options/DRR-BioIR-v0-LOL-v2-real.yml --weights experiments/DRR-BioIR-v0-LOLv2-real/models/best_G.pth --dataset LOL-v2-real
+python test_lol.py --opt options/DRR-BioIR-v0-LOL-v2-real.yml --weights ./experiments/DRR-BioIR-v0-LOLv2-real/models/best_G.pth --dataset LOL-v2-real
+
 ```
 
 
@@ -247,8 +282,12 @@ python test_lol.py --opt options/DRR-BioIR-v0-LOL-v2-real.yml --weights experime
 
 训练
 
+- 耗时
+  - 5090：11h
+
 ```
 sh train.sh options/DRR-BioIR-v0-LOL-v2-syn.yml
+tensorboard --logdir ./BioIR-M/experiments/DRR-BioIR-v0-gaussianA-LOLv2-syn/tb_looger --port 6010
 ```
 
 测试
@@ -261,19 +300,7 @@ sh train.sh options/DRR-BioIR-v0-LOL-v2-syn.yml
 
 ```
 python test_lol.py --opt options/DRR-BioIR-v0-LOL-v2-syn.yml --weights experiments/DRR-BioIR-v0-LOLv2-syn/models/best_G.pth --dataset LOL-v2-syn
+
+ln -s "./BioIR-M/experiments/DRR-BioIR-v0-gaussianA-LOLv2-syn/tb_looger" "./tf_dir"
 ```
-
-# DRR-BioIR v0
-
-DRR-BioIR v0 使用独立配置与独立实验名，不会覆盖原始 BioIR 的权重、日志或测试结果。
-`train.sh` 和 `test_lol.py` 仍分别是唯一训练与测试入口。
-
-```bash
-# LOL-v1
-
-```
-
-v0 默认启用三尺度 DCBC/ADRI，并使用 `L1 + 0.1 FFT + 0.05 L_A + 0.05 L_R`。
-RA-GDFN 已实现但默认关闭；需要参数匹配消融时，将对应 YAML 的
-`network_g.use_ra_gdfn` 改为 `true`。
 
