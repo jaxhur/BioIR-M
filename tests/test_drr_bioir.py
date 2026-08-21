@@ -44,9 +44,19 @@ class DRRBioIRTest(unittest.TestCase):
         self.assertEqual(restored.shape, image.shape)
         self.assertEqual(auxiliary['demand'].shape, (1, 1, 64, 96))
         self.assertEqual(auxiliary['reliability'].shape, (1, 1, 64, 96))
+        self.assertEqual(auxiliary['demand_gate'].shape, (1, 24, 1))
         for prior in auxiliary.values():
             self.assertGreaterEqual(float(prior.min()), 0.0)
             self.assertLessEqual(float(prior.max()), 1.0)
+
+    def test_demand_gate_keeps_the_padded_routing_grid(self):
+        """非整除输入返回的 A_D 必须保留 ADRI 实际使用的补边 token 网格。"""
+        network = self._build_network().eval()
+        image = torch.rand(1, 3, 65, 97)
+        with torch.no_grad():
+            _, auxiliary = network(image, return_aux=True)
+        # 65×97 补至 96×128，随后按 16×16 聚合为 6×8 个细节 token。
+        self.assertEqual(auxiliary['demand_gate'].shape, (1, 48, 1))
 
     def test_shared_detail_gate_grid_has_expected_token_count(self):
         """A/R 的 16×16 聚合应生成三尺度共享的行优先 token 网格。"""

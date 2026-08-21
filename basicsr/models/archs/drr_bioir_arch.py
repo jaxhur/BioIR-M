@@ -744,6 +744,8 @@ class DRRBioIR(nn.Module):
         if input_pad_factor % detail_patch_sizes[0]:
             raise ValueError('input_pad_factor 必须整除第一尺度 detail patch。')
         self.input_pad_factor = input_pad_factor
+        # 第一尺度细节 token 的网格就是 A_D/R_D 的实际路由网格。
+        self.gate_detail_patch_size = detail_patch_sizes[0]
         self.structure_tau = structure_tau
         self.log_epsilon = log_epsilon
         self.gate_topk = gate_topk
@@ -832,7 +834,10 @@ class DRRBioIR(nn.Module):
         demand, reliability = self.prior_head(input_feature, luminance_level1,
                                                structure_level1)
         demand_tokens, reliability_tokens = aggregate_detail_gates(
-            demand, reliability, detail_patch_size=16, reliability_topk=self.gate_topk)
+            demand,
+            reliability,
+            detail_patch_size=self.gate_detail_patch_size,
+            reliability_topk=self.gate_topk)
 
         encoder_level1 = self._run_blocks(self.encoder_level1, input_feature,
                                            luminance_level1,
@@ -880,5 +885,7 @@ class DRRBioIR(nn.Module):
             return restored
         return restored, {
             'demand': demand[:, :, :original_height, :original_width],
-            'reliability': reliability[:, :, :original_height, :original_width]
+            'reliability': reliability[:, :, :original_height, :original_width],
+            # 返回补边空间内已送入 ADRI 的真实 A_D，避免训练端裁边后重复池化。
+            'demand_gate': demand_tokens
         }

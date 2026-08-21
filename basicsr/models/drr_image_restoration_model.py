@@ -8,7 +8,9 @@ from typing import Dict
 import torch
 import torch.nn.functional as F
 
-from basicsr.models.archs.drr_bioir_arch import build_drr_targets
+from basicsr.models.archs.drr_bioir_arch import (aggregate_detail_gates,
+                                                  build_drr_targets,
+                                                  pad_to_factor)
 from basicsr.models.image_restoration_model import ImageRestorationModel
 
 
@@ -25,6 +27,8 @@ class DRRImageRestorationModel(ImageRestorationModel):
         self.smooth_l1_beta = float(drr_opt.get('smooth_l1_beta', 0.10))
         self.demand_target_type = str(
             drr_opt.get('demand_target_type', 'relative_gap'))
+        self.demand_supervision_type = str(
+            drr_opt.get('demand_supervision_type', 'pixel'))
         self.demand_epsilon = float(drr_opt.get('demand_epsilon', 0.05))
         self.demand_gaussian_kernel_size = int(
             drr_opt.get('demand_gaussian_kernel_size', 15))
@@ -36,6 +40,8 @@ class DRRImageRestorationModel(ImageRestorationModel):
             raise ValueError(
                 'demand_target_type 只能是 relative_gap 或 '
                 'gaussian_smoothed_absolute_gap。')
+        if self.demand_supervision_type not in {'pixel', 'gate'}:
+            raise ValueError('demand_supervision_type 只能是 pixel 或 gate。')
         self.structure_tau = float(drr_opt.get('structure_tau', 0.10))
         self.magnitude_tau = float(drr_opt.get('magnitude_tau', 0.05))
         self.log_epsilon = float(drr_opt.get('log_epsilon', 0.02))
@@ -109,6 +115,30 @@ class DRRImageRestorationModel(ImageRestorationModel):
                                 self._probe_targets[name][0].clamp(0, 1),
                                 current_iter)
 
+    def _build_demand_gate_target(self) -> torch.Tensor:
+        """按网络补边与池化规则构造真实 A_D 的配对监督目标。"""
+        bare_net = self.get_bare_model(self.net_g)
+        padded_lq, _ = pad_to_factor(self.lq, bare_net.input_pad_factor)
+        padded_gt, _ = pad_to_factor(self.gt, bare_net.input_pad_factor)
+        padded_targets = build_drr_targets(
+            padded_lq,
+            padded_gt,
+            demand_epsilon=self.demand_epsilon,
+            demand_target_type=self.demand_target_type,
+            demand_gaussian_kernel_size=self.demand_gaussian_kernel_size,
+            demand_gaussian_sigma=self.demand_gaussian_sigma,
+            demand_tau=self.demand_tau,
+            structure_tau=self.structure_tau,
+            magnitude_tau=self.magnitude_tau,
+            log_epsilon=self.log_epsilon,
+            reliability_epsilon=self.reliability_epsilon)
+        demand_gate_target, _ = aggregate_detail_gates(
+            padded_targets['demand'],
+            padded_targets['reliability'],
+            detail_patch_size=bare_net.gate_detail_patch_size,
+            reliability_topk=bare_net.gate_topk)
+        return demand_gate_target
+
     def optimize_parameters(self, current_iter, tb_logger):
         """执行恢复损失、A/R 辅助监督及参数更新。"""
         self.optimizer_g.zero_grad()
@@ -138,9 +168,15 @@ class DRRImageRestorationModel(ImageRestorationModel):
             total_loss = total_loss + fft_loss
             loss_dict['l_fft'] = fft_loss
 
-        demand_loss = F.smooth_l1_loss(auxiliary['demand'],
-                                       targets['demand'],
-                                       beta=self.smooth_l1_beta)
+        if self.demand_supervision_type == 'gate':
+            demand_loss = F.smooth_l1_loss(
+                auxiliary['demand_gate'],
+                self._build_demand_gate_target(),
+                beta=self.smooth_l1_beta)
+        else:
+            demand_loss = F.smooth_l1_loss(auxiliary['demand'],
+                                           targets['demand'],
+                                           beta=self.smooth_l1_beta)
         reliability_error = F.smooth_l1_loss(auxiliary['reliability'],
                                              targets['reliability'],
                                              beta=self.smooth_l1_beta,

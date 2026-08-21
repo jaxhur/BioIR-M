@@ -1,5 +1,5 @@
 # DRR-BioIR v0 LOL-v2-real independent training configuration.
-name: DRR-BioIR-v0-gaussianA-LOLv2-real
+name: DRR-BioIR-v0-gaussianA-gate-LOLv2-real
 model_type: DRRImageRestorationModel
 scale: 1
 num_gpu: 1
@@ -83,6 +83,8 @@ train:
     smooth_l1_beta: 0.10
     # 可切回 relative_gap 复现原 A*；本实验默认使用 Gaussian 平滑绝对亮度缺口。
     demand_target_type: gaussian_smoothed_absolute_gap
+    # gate 使用网络补边后实际送入 ADRI 的 A_D；改为 pixel 可回滚原像素级 A 监督。
+    demand_supervision_type: gate
     demand_epsilon: 0.05
     demand_gaussian_kernel_size: 15
     demand_gaussian_sigma: 3.0
