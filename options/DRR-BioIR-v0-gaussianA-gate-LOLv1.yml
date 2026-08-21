@@ -1,5 +1,5 @@
-# DRR-BioIR v0 LOL-v2-syn independent training configuration.
-name: DRR-BioIR-v0-gaussianA-LOLv2-syn
+# DRR-BioIR v0 LOL-v1 gate A_D supervision configuration.
+name: DRR-BioIR-v0-gaussianA-gate-LOLv1
 model_type: DRRImageRestorationModel
 scale: 1
 num_gpu: 1
@@ -7,10 +7,10 @@ manual_seed: 42
 
 datasets:
   train:
-    name: LOLv2-syn-train
+    name: LOLv1-train
     type: PairedImageDataset
-    dataroot_gt: ./datasets/LOL-v2/Synthetic/Train/Normal
-    dataroot_lq: ./datasets/LOL-v2/Synthetic/Train/Low
+    dataroot_gt: ./datasets/LOL-v1/our485/high
+    dataroot_lq: ./datasets/LOL-v1/our485/low
     filename_tmpl: '{}'
     io_backend:
       type: disk
@@ -24,10 +24,10 @@ datasets:
     prefetch_mode: ~
 
   val:
-    name: LOLv2-syn-test
+    name: LOLv1-test
     type: PairedImageDataset
-    dataroot_gt: ./datasets/LOL-v2/Synthetic/Test/Normal
-    dataroot_lq: ./datasets/LOL-v2/Synthetic/Test/Low
+    dataroot_gt: ./datasets/LOL-v1/eval15/high
+    dataroot_lq: ./datasets/LOL-v1/eval15/low
     filename_tmpl: '{}'
     io_backend:
       type: disk
@@ -42,11 +42,14 @@ network_g:
   ffn_expansion_factor: 3
   bias: false
   prior_hidden_channels: 16
+  # The padding factor keeps all three detail-token grids aligned with A/R.
   input_pad_factor: 32
   adri_context_patch_sizes: [64, 32, 16]
   adri_detail_patch_sizes: [16, 8, 4]
   adri_num_heads: 1
+  # P3 enables all scales; use [2, 3] or [3] for P2 or P1 ablations.
   adri_scales: [1, 2, 3]
+  # v0 verifies DCBC plus ADRI first; enable this for a matched RA-GDFN ablation.
   use_ra_gdfn: false
   structure_tau: 0.10
   log_epsilon: 0.02
@@ -77,16 +80,18 @@ train:
     type: FFTLoss
     loss_weight: 0.1
     reduction: mean
+  # A/R targets use paired GT only during training; inference reads only LQ input.
   drr_loss_opt:
     demand_loss_weight: 0.05
     reliability_loss_weight: 0.05
     smooth_l1_beta: 0.10
-    # 可切回 relative_gap 复现原 A*；本实验默认使用 Gaussian 平滑绝对亮度缺口。
+    # gate 直接监督补边后实际送入 ADRI 的 A_D；R 仍采用带 edge_weight 的像素级监督。
+    demand_supervision_type: gate
     demand_target_type: gaussian_smoothed_absolute_gap
     demand_epsilon: 0.05
     demand_gaussian_kernel_size: 15
     demand_gaussian_sigma: 3.0
-    demand_tau: 0.4942169189453125
+    demand_tau: 0.6374053955078125
     structure_tau: 0.10
     magnitude_tau: 0.05
     log_epsilon: 0.02

@@ -1,5 +1,5 @@
-# DRR-BioIR v0 LOL-v2-syn independent training configuration.
-name: DRR-BioIR-v0-gaussianA-LOLv2-syn
+# DRR-BioIR v0 LOL-v2-real gate A_D supervision configuration.
+name: DRR-BioIR-v0-gaussianA-gate-LOLv2-real
 model_type: DRRImageRestorationModel
 scale: 1
 num_gpu: 1
@@ -7,10 +7,10 @@ manual_seed: 42
 
 datasets:
   train:
-    name: LOLv2-syn-train
+    name: LOLv2-real-train
     type: PairedImageDataset
-    dataroot_gt: ./datasets/LOL-v2/Synthetic/Train/Normal
-    dataroot_lq: ./datasets/LOL-v2/Synthetic/Train/Low
+    dataroot_gt: ./datasets/LOL-v2/Real_captured/Train/Normal
+    dataroot_lq: ./datasets/LOL-v2/Real_captured/Train/Low
     filename_tmpl: '{}'
     io_backend:
       type: disk
@@ -24,10 +24,10 @@ datasets:
     prefetch_mode: ~
 
   val:
-    name: LOLv2-syn-test
+    name: LOLv2-real-test
     type: PairedImageDataset
-    dataroot_gt: ./datasets/LOL-v2/Synthetic/Test/Normal
-    dataroot_lq: ./datasets/LOL-v2/Synthetic/Test/Low
+    dataroot_gt: ./datasets/LOL-v2/Real_captured/Test/Normal
+    dataroot_lq: ./datasets/LOL-v2/Real_captured/Test/Low
     filename_tmpl: '{}'
     io_backend:
       type: disk
@@ -81,12 +81,13 @@ train:
     demand_loss_weight: 0.05
     reliability_loss_weight: 0.05
     smooth_l1_beta: 0.10
-    # 可切回 relative_gap 复现原 A*；本实验默认使用 Gaussian 平滑绝对亮度缺口。
+    # gate 直接监督补边后实际送入 ADRI 的 A_D；R 仍采用带 edge_weight 的像素级监督。
+    demand_supervision_type: gate
     demand_target_type: gaussian_smoothed_absolute_gap
     demand_epsilon: 0.05
     demand_gaussian_kernel_size: 15
     demand_gaussian_sigma: 3.0
-    demand_tau: 0.4942169189453125
+    demand_tau: 0.63360595703125
     structure_tau: 0.10
     magnitude_tau: 0.05
     log_epsilon: 0.02
