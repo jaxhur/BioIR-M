@@ -22,13 +22,41 @@ class DRRImageRestorationModel(ImageRestorationModel):
         super().init_training_settings()
         drr_opt = self.opt['train'].get('drr_loss_opt', {})
         self.demand_loss_weight = float(drr_opt.get('demand_loss_weight', 0.05))
+        self.demand_supervision_type = str(
+            drr_opt.get('demand_supervision_type', 'pixel'))
+        if self.demand_supervision_type not in {'pixel', 'gate', 'hybrid'}:
+            raise ValueError(
+                'demand_supervision_type 只能是 pixel、gate 或 hybrid。')
+        if self.demand_supervision_type == 'pixel':
+            self.demand_pixel_loss_weight = float(
+                drr_opt.get('demand_pixel_loss_weight', self.demand_loss_weight))
+            self.demand_gate_loss_weight = 0.0
+        elif self.demand_supervision_type == 'gate':
+            self.demand_pixel_loss_weight = 0.0
+            self.demand_gate_loss_weight = float(
+                drr_opt.get('demand_gate_loss_weight', self.demand_loss_weight))
+        else:
+            if ('demand_pixel_loss_weight' not in drr_opt or
+                    'demand_gate_loss_weight' not in drr_opt):
+                raise ValueError(
+                    'hybrid 监督必须显式配置 demand_pixel_loss_weight 和 '
+                    'demand_gate_loss_weight。')
+            self.demand_pixel_loss_weight = float(
+                drr_opt['demand_pixel_loss_weight'])
+            self.demand_gate_loss_weight = float(
+                drr_opt['demand_gate_loss_weight'])
+        if (self.demand_pixel_loss_weight < 0.0 or
+                self.demand_gate_loss_weight < 0.0):
+            raise ValueError('A 的像素级与 gate 级损失权重不能为负数。')
+        if (self.demand_supervision_type == 'hybrid' and
+                (self.demand_pixel_loss_weight == 0.0 or
+                 self.demand_gate_loss_weight == 0.0)):
+            raise ValueError('hybrid 监督的两项 A 损失权重都必须大于 0。')
         self.reliability_loss_weight = float(
             drr_opt.get('reliability_loss_weight', 0.05))
         self.smooth_l1_beta = float(drr_opt.get('smooth_l1_beta', 0.10))
         self.demand_target_type = str(
             drr_opt.get('demand_target_type', 'relative_gap'))
-        self.demand_supervision_type = str(
-            drr_opt.get('demand_supervision_type', 'pixel'))
         self.demand_epsilon = float(drr_opt.get('demand_epsilon', 0.05))
         self.demand_gaussian_kernel_size = int(
             drr_opt.get('demand_gaussian_kernel_size', 15))
@@ -40,8 +68,6 @@ class DRRImageRestorationModel(ImageRestorationModel):
             raise ValueError(
                 'demand_target_type 只能是 relative_gap 或 '
                 'gaussian_smoothed_absolute_gap。')
-        if self.demand_supervision_type not in {'pixel', 'gate'}:
-            raise ValueError('demand_supervision_type 只能是 pixel 或 gate。')
         self.structure_tau = float(drr_opt.get('structure_tau', 0.10))
         self.magnitude_tau = float(drr_opt.get('magnitude_tau', 0.05))
         self.log_epsilon = float(drr_opt.get('log_epsilon', 0.02))
@@ -139,6 +165,31 @@ class DRRImageRestorationModel(ImageRestorationModel):
             reliability_topk=bare_net.gate_topk)
         return demand_gate_target
 
+    def _calculate_demand_losses(
+            self, auxiliary: Dict[str, torch.Tensor],
+            targets: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """计算当前配置启用的 A 像素级与 gate 级原始损失。
+
+        Args:
+            auxiliary: 网络返回的像素级 A 与真实路由 A_D。
+            targets: 由配对 LQ/GT 构造的像素级监督目标。
+
+        Returns:
+            按 ``pixel``、``gate`` 命名的已启用 SmoothL1 loss。
+        """
+        demand_losses = OrderedDict()
+        if self.demand_pixel_loss_weight > 0.0:
+            demand_losses['pixel'] = F.smooth_l1_loss(
+                auxiliary['demand'],
+                targets['demand'],
+                beta=self.smooth_l1_beta)
+        if self.demand_gate_loss_weight > 0.0:
+            demand_losses['gate'] = F.smooth_l1_loss(
+                auxiliary['demand_gate'],
+                self._build_demand_gate_target(),
+                beta=self.smooth_l1_beta)
+        return demand_losses
+
     def optimize_parameters(self, current_iter, tb_logger):
         """执行恢复损失、A/R 辅助监督及参数更新。"""
         self.optimizer_g.zero_grad()
@@ -168,15 +219,19 @@ class DRRImageRestorationModel(ImageRestorationModel):
             total_loss = total_loss + fft_loss
             loss_dict['l_fft'] = fft_loss
 
-        if self.demand_supervision_type == 'gate':
-            demand_loss = F.smooth_l1_loss(
-                auxiliary['demand_gate'],
-                self._build_demand_gate_target(),
-                beta=self.smooth_l1_beta)
-        else:
-            demand_loss = F.smooth_l1_loss(auxiliary['demand'],
-                                           targets['demand'],
-                                           beta=self.smooth_l1_beta)
+        demand_losses = self._calculate_demand_losses(auxiliary, targets)
+        demand_loss_weights = {
+            'pixel': self.demand_pixel_loss_weight,
+            'gate': self.demand_gate_loss_weight
+        }
+        for name, demand_loss in demand_losses.items():
+            weighted_demand_loss = demand_loss_weights[name] * demand_loss
+            total_loss = total_loss + weighted_demand_loss
+            loss_dict[f'l_demand_{name}'] = demand_loss
+            loss_dict[f'l_demand_{name}_weighted'] = weighted_demand_loss
+        # 旧配置继续输出原有键名，避免已有 pixel/gate 实验的日志口径变化。
+        if len(demand_losses) == 1:
+            loss_dict['l_demand'] = next(iter(demand_losses.values()))
         reliability_error = F.smooth_l1_loss(auxiliary['reliability'],
                                              targets['reliability'],
                                              beta=self.smooth_l1_beta,
@@ -184,10 +239,10 @@ class DRRImageRestorationModel(ImageRestorationModel):
         reliability_weight = 1.0 + self.edge_weight * targets['edge_presence']
         reliability_loss = (reliability_error * reliability_weight).sum() / (
             reliability_weight.sum() + self.reliability_epsilon)
-        total_loss = total_loss + self.demand_loss_weight * demand_loss
-        total_loss = total_loss + self.reliability_loss_weight * reliability_loss
-        loss_dict['l_demand'] = demand_loss
+        weighted_reliability_loss = self.reliability_loss_weight * reliability_loss
+        total_loss = total_loss + weighted_reliability_loss
         loss_dict['l_reliability'] = reliability_loss
+        loss_dict['l_reliability_weighted'] = weighted_reliability_loss
         loss_dict['l_total'] = total_loss
 
         # 保留零梯度连接，兼容 BasicSR 对所有参数参与图构建的既有约定。

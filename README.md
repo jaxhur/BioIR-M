@@ -16,6 +16,8 @@ cd BioIR-M
 git switch codex/drr-v0
 
 bash scripts/bootstrap_environment_and_datasets.sh
+
+bash scripts/bootstrap_bioir_cu128_and_datasets.sh
 ```
 
 ```bash
@@ -81,11 +83,8 @@ pip install opencv-python lmdb tqdm einops scipy scikit-image tensorboard natsor
 python -c "import torch; print('torch:', torch.__version__); print('CUDA runtime:', torch.version.cuda); print('available:', torch.cuda.is_available()); print('arch list:', torch.cuda.get_arch_list()); [print(f'gpu{i}: {torch.cuda.get_device_name(i)}, sm_{torch.cuda.get_device_capability(i)[0]}{torch.cuda.get_device_capability(i)[1]}') for i in range(torch.cuda.device_count())]"
 
 # 安装basicsr
-cd BioIR-M
 python -m pip install -e .
 # 旧版命令：python setup.py develop --no_cuda_ext
-# 验证
-python -c "import basicsr; print(basicsr.__file__)"
 ```
 
 
@@ -103,10 +102,6 @@ cd ./datasets
 gdown "https://drive.google.com/uc?id=1mAN3ll5wWwt1Xz0C7uio31-NJu-50S8Z"
 # LOL-v2
 gdown "https://drive.google.com/uc?id=1L0UnJg6gZ4Eb7It2EuNxP0L3lQNmKMaP"
-
-# 如果是AUtoDL平台
-cp /root/autodl-fs/LOL-v1.zip /root/BioIR/Single_Composite/datasets
-cp /root/autodl-fs/LOL-v2-renamed.zip /root/BioIR/Single_Composite/datasets
 
 # 解压
 unzip LOL-v1.zip -d LOL-v1
@@ -217,13 +212,14 @@ test_result/<实验名>/<数据集名>/
 - 耗时：
   - 4090：最多15h、至少13h
     - 一般都是0.25$，有时能弄到0.22\$，总成本=14\*0.25\*6.8=23.8
+    - 最便宜的是韩国的一个,0.19，总成本=13\*0.193\*6.8=17
   - 5090
     - 一般是0.35\$，有时能弄到0.32\$，总成本=23.8/0.35/6.8=10，只要5090上的耗时小于10小时，就使用5090
 
 ```
 sh train.sh options/DRR-BioIR-v0-LOL-v1.yml
 
-tensorboard --logdir ./BioIR-M/experiments/DRR-BioIR-v0-gaussianA-LOLv1/tb_looger --port 6009
+tensorboard --logdir ./BioIR-M/experiments/DRR-BioIR-v0-gaussianA-gate-LOLv1/tb_looger --port 6010
 ```
 
 先验

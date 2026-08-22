@@ -11,6 +11,7 @@ from basicsr.models.archs.drr_bioir_arch import (DRRBioIR,
                                                   build_relative_demand_target,
                                                   calculate_luminance,
                                                   gaussian_smooth_luminance)
+from basicsr.models.drr_image_restoration_model import DRRImageRestorationModel
 
 
 class DRRBioIRTest(unittest.TestCase):
@@ -128,6 +129,36 @@ class DRRBioIRTest(unittest.TestCase):
             loss.backward()
             self.assertTrue(
                 any(parameter.grad is not None for parameter in network.parameters()))
+
+    def test_hybrid_demand_supervision_calculates_both_losses(self):
+        """混合 A 监督必须同时计算像素级与真实路由 gate 级损失。"""
+        model = DRRImageRestorationModel.__new__(DRRImageRestorationModel)
+        model.demand_pixel_loss_weight = 0.05
+        model.demand_gate_loss_weight = 0.01
+        model.smooth_l1_beta = 0.10
+        demand_gate_target = torch.tensor([[[0.2], [0.8]]])
+        model._build_demand_gate_target = lambda: demand_gate_target
+
+        auxiliary = {
+            'demand': torch.tensor([[[[0.1, 0.7], [0.4, 0.9]]]]),
+            'demand_gate': torch.tensor([[[0.3], [0.6]]])
+        }
+        targets = {
+            'demand': torch.tensor([[[[0.2, 0.5], [0.6, 0.8]]]])
+        }
+        losses = model._calculate_demand_losses(auxiliary, targets)
+
+        self.assertEqual(tuple(losses), ('pixel', 'gate'))
+        torch.testing.assert_close(
+            losses['pixel'],
+            torch.nn.functional.smooth_l1_loss(auxiliary['demand'],
+                                                targets['demand'],
+                                                beta=0.10))
+        torch.testing.assert_close(
+            losses['gate'],
+            torch.nn.functional.smooth_l1_loss(auxiliary['demand_gate'],
+                                                demand_gate_target,
+                                                beta=0.10))
 
 
 if __name__ == '__main__':
