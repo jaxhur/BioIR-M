@@ -217,9 +217,14 @@ test_result/<实验名>/<数据集名>/
     - 一般是0.35\$，有时能弄到0.32\$，总成本=23.8/0.35/6.8=10，只要5090上的耗时小于10小时，就使用5090
 
 ```
+# 当前默认：旧 A* 相对亮度缺口 + 像素级监督
 sh train.sh options/DRR-BioIR-v0-LOL-v1.yml
+tensorboard --logdir ./BioIR-M/experiments/DRR-BioIR-v0-relativeA-pixel-LOLv1/tb_looger --port 6009
 
+# Gaussian A* + hybrid 监督仅保留为历史对照
+sh train.sh options/DRR-BioIR-v0-gaussianA-hybrid-LOLv1.yml
 tensorboard --logdir ./BioIR-M/experiments/DRR-BioIR-v0-gaussianA-gate-LOLv1/tb_looger --port 6010
+tensorboard --logdir ./BioIR-M/experiments/DRR-BioIR-v0-gaussianA-hybrid-LOLv1/tb_looger --port 6004
 ```
 
 先验
@@ -242,7 +247,7 @@ tensorboard --logdir ./BioIR-M/experiments/DRR-BioIR-v0-gaussianA-gate-LOLv1/tb_
 
 ```
 # LOL-v1
-python test_lol.py --opt options/DRR-BioIR-v0-LOL-v1.yml --weights experiments/DRR-BioIR-v0-LOLv1/models/best_G.pth --dataset LOL-v1
+python test_lol.py --opt options/DRR-BioIR-v0-LOL-v1.yml --weights experiments/DRR-BioIR-v0-relativeA-pixel-LOLv1/models/best_G.pth --dataset LOL-v1
 ```
 
 
@@ -256,7 +261,7 @@ python test_lol.py --opt options/DRR-BioIR-v0-LOL-v1.yml --weights experiments/D
 
 ```
 sh train.sh options/DRR-BioIR-v0-LOL-v2-real.yml
-tensorboard --logdir ./BioIR-M/experiments/DRR-BioIR-v0-gaussianA-LOLv2-real/tb_looger --port 6009
+tensorboard --logdir ./BioIR-M/experiments/DRR-BioIR-v0-relativeA-pixel-LOLv2-real/tb_looger --port 6009
 ```
 
 测试
@@ -268,7 +273,7 @@ tensorboard --logdir ./BioIR-M/experiments/DRR-BioIR-v0-gaussianA-LOLv2-real/tb_
 - FLOPS(G)：
 
 ```
-python test_lol.py --opt options/DRR-BioIR-v0-LOL-v2-real.yml --weights ./experiments/DRR-BioIR-v0-LOLv2-real/models/best_G.pth --dataset LOL-v2-real
+python test_lol.py --opt options/DRR-BioIR-v0-LOL-v2-real.yml --weights ./experiments/DRR-BioIR-v0-relativeA-pixel-LOLv2-real/models/best_G.pth --dataset LOL-v2-real
 
 ```
 
@@ -283,7 +288,7 @@ python test_lol.py --opt options/DRR-BioIR-v0-LOL-v2-real.yml --weights ./experi
 
 ```
 sh train.sh options/DRR-BioIR-v0-LOL-v2-syn.yml
-tensorboard --logdir ./BioIR-M/experiments/DRR-BioIR-v0-gaussianA-LOLv2-syn/tb_looger --port 6010
+tensorboard --logdir ./BioIR-M/experiments/DRR-BioIR-v0-relativeA-pixel-LOLv2-syn/tb_looger --port 6010
 ```
 
 测试
@@ -295,8 +300,8 @@ tensorboard --logdir ./BioIR-M/experiments/DRR-BioIR-v0-gaussianA-LOLv2-syn/tb_l
 - FLOPS(G)：
 
 ```
-python test_lol.py --opt options/DRR-BioIR-v0-LOL-v2-syn.yml --weights experiments/DRR-BioIR-v0-LOLv2-syn/models/best_G.pth --dataset LOL-v2-syn
+python test_lol.py --opt options/DRR-BioIR-v0-LOL-v2-syn.yml --weights experiments/DRR-BioIR-v0-relativeA-pixel-LOLv2-syn/models/best_G.pth --dataset LOL-v2-syn
 
-ln -s "./BioIR-M/experiments/DRR-BioIR-v0-gaussianA-LOLv2-syn/tb_looger" "./tf_dir"
+ln -s "./BioIR-M/experiments/DRR-BioIR-v0-relativeA-pixel-LOLv2-syn/tb_looger" "./tf_dir"
 ```
 
