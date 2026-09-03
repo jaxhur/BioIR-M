@@ -14,12 +14,13 @@
 git clone https://github.com/jaxhur/BioIR-M.git
 
 conda remove -n bioir --all -y
-conda create -n bioir python=3.9 -y 
-conda activate bioir
+conda create -n bear-bioir python=3.10 -y
+conda activate bear-bioir
 
 # 安装依赖
-# conda install pytorch=2.4.0 torchvision pytorch-cuda=12.4 -c pytorch -c nvidia -y
-pip install --no-cache-dir torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu124
+# 4090/5090 共用 CUDA 12.8 build；不要继续使用旧的 cu124 轮子。
+# 具体版本由 PyTorch 官方 cu128 索引提供，安装后必须核对 torch.version.cuda。
+pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 pip install opencv-python lmdb tqdm einops scipy scikit-image tensorboard natsort pyiqa joblib lpips ptflops scikit-learn pandas thop
 
 python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
@@ -93,6 +94,25 @@ datasets/LOL-v2-Fr/Real_captured/Test/{Low,Normal}
 
 不同方案应使用不同的 YAML `name`。训练产物和测试产物会按该实验名隔离，便于在同一服务器顺序切换分支训练。
 
+### 方案 3：BEAR-BioIR
+
+方案 3 使用新增的 `BEARBioIR` 网络与 `BEARBioIRModel` 训练类；原始 BioIR
+配置和代码不改，用作 baseline 对照。三套配置仍为单卡、`BatchSize=4`、训练
+`PatchSize=256×256`、`total_iter=150000`；数据就绪后，每个 epoch 的真实
+iteration 数由 DataLoader 长度计算，不能只用图片数粗算。
+
+```bash
+# 由服务器实际可见卡决定，不在 train.sh 中写死设备编号。
+CUDA_VISIBLE_DEVICES=<服务器分配的单卡编号> sh train.sh options/BEAR-LOLv1.yml
+CUDA_VISIBLE_DEVICES=<服务器分配的单卡编号> sh train.sh options/BEAR-LOLv2-syn.yml
+CUDA_VISIBLE_DEVICES=<服务器分配的单卡编号> sh train.sh options/BEAR-LOLv2-real.yml
+```
+
+每次切换 4090/5090 服务器后，先在目标服务器核对 `torch.__version__`、
+`torch.version.cuda`、driver，并执行一次真实 batch 的前向、反向及 AMP 冒烟。
+本项目没有自定义 CUDA 扩展；`batch_size_per_gpu`、worker 数和 AMP 策略可按
+服务器调整，但不得改动模型、损失、评价口径或 checkpoint 语义。
+
 ## Tensorboard
 
 ```
@@ -142,6 +162,15 @@ experiments/<实验名/
 python test_lol.py --opt options/LOL-v2-syn.yml --weights pretrained_models/LOL-v2-syn.pth
 # 额外保存低光图/增强图/GT 的横向拼接对比图
 python test_lol.py --opt options/LOL-v2-syn.yml --weights pretrained_models/LOL-v2-syn.pth --save_comparison
+```
+
+BEAR-BioIR 测试仍使用唯一入口 `test_lol.py`；默认按 64 的倍数右下反射补边，
+模型输出和指标计算前会恢复原图尺寸：
+
+```bash
+python test_lol.py --opt options/BEAR-LOLv1.yml --weights experiments/BEAR-BioIR-LOLv1/models/best_G.pth
+python test_lol.py --opt options/BEAR-LOLv2-syn.yml --weights experiments/BEAR-BioIR-LOLv2-syn/models/best_G.pth
+python test_lol.py --opt options/BEAR-LOLv2-real.yml --weights experiments/BEAR-BioIR-LOLv2-real/models/best_G.pth
 ```
 
 

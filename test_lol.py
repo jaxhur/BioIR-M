@@ -241,7 +241,9 @@ def main():
         help=('测试产物目录；默认使用 '
               'test_result/<实验名>/<数据集名>。'))
     parser.add_argument('--device', default='auto', choices=['auto', 'cuda', 'cpu'])
-    parser.add_argument('--factor', type=int, default=32)
+    parser.add_argument(
+        '--factor', type=int, default=64,
+        help='推理入口补边倍数；BEAR-BioIR 使用方案固定的 64。')
     parser.add_argument('--save_comparison', action='store_true')
     args = parser.parse_args()
 
