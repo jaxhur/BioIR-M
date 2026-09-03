@@ -691,8 +691,6 @@ class BEARBioIR(nn.Module):
         self.encoder_level3 = make_blocks(2, num_blocks[2])
         self.decoder_level3 = make_blocks(2, num_blocks[2])
         self.up3_2 = Upsample(dim * 4)
-        self.reduce_chan_level2 = nn.Conv2d(dim * 4, dim * 2, kernel_size=1,
-                                            bias=bias)
         self.decoder_level2 = make_blocks(1, num_blocks[1])
         self.up2_1 = Upsample(dim * 2)
         self.decoder_level1 = make_blocks(0, num_blocks[0])
