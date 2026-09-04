@@ -1,11 +1,3 @@
-# BioIR原始论文
-
-<img src="img/README_img/image-20260630192144846.png" alt="image-20260630192144846" style="zoom:80%;" />
-
-<img src="img/README_img/image-20260716224418604.png" alt="image-20260716224418604" style="zoom:67%;" />
-
-
-
 # 创建环境
 
 创建环境：
@@ -13,13 +5,13 @@
 ```
 git clone https://github.com/jaxhur/BioIR-M.git
 
-conda remove -n bioir --all -y
-conda create -n bear-bioir python=3.10 -y
+cd BioIR-M
+git switch codex/bear-bioir
+
+conda create -n bear-bioir python=3.10 -y --override-channels -c https://repo.anaconda.com/pkgs/main
 conda activate bear-bioir
 
 # 安装依赖
-# 4090/5090 共用 CUDA 12.8 build；不要继续使用旧的 cu124 轮子。
-# 具体版本由 PyTorch 官方 cu128 索引提供，安装后必须核对 torch.version.cuda。
 pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 pip install opencv-python lmdb tqdm einops scipy scikit-image tensorboard natsort pyiqa joblib lpips ptflops scikit-learn pandas thop
 
@@ -52,12 +44,16 @@ gdown "https://drive.google.com/uc?id=1mAN3ll5wWwt1Xz0C7uio31-NJu-50S8Z"
 # LOL-v2
 gdown "https://drive.google.com/uc?id=1L0UnJg6gZ4Eb7It2EuNxP0L3lQNmKMaP"
 
+#hyperai
+cp /openbayes/input/input0/LOL-v1.zip /openbayes/input/input0/LOL-v2-renamed.zip /openbayes/home/BioIR-M/datasets
+
 # AUtoDL
 cp /root/autodl-fs/LOL-v1.zip /root/BioIR/Single_Composite/datasets
 cp /root/autodl-fs/LOL-v2-renamed.zip /root/BioIR/Single_Composite/datasets
 
 # 解压
-cd /root/BioIR-M/datasets
+cd /openbayes/home/BioIR-M
+cd ./datasets
 unzip LOL-v1.zip -d LOL-v1
 unzip LOL-v2-renamed.zip -d LOL-v2
 
@@ -92,26 +88,13 @@ datasets/LOL-v2-Fr/Real_captured/Test/{Low,Normal}
 | LOL-v2-syn  |         4 |       256 |           150,000 |
 | LOL-v2-real |         4 |       256 |           150,000 |
 
-不同方案应使用不同的 YAML `name`。训练产物和测试产物会按该实验名隔离，便于在同一服务器顺序切换分支训练。
 
-### 方案 3：BEAR-BioIR
 
-方案 3 使用新增的 `BEARBioIR` 网络与 `BEARBioIRModel` 训练类；原始 BioIR
-配置和代码不改，用作 baseline 对照。三套配置仍为单卡、`BatchSize=4`、训练
-`PatchSize=256×256`、`total_iter=150000`；数据就绪后，每个 epoch 的真实
-iteration 数由 DataLoader 长度计算，不能只用图片数粗算。
 
-```bash
-# 由服务器实际可见卡决定，不在 train.sh 中写死设备编号。
-CUDA_VISIBLE_DEVICES=<服务器分配的单卡编号> sh train.sh options/BEAR-LOLv1.yml
-CUDA_VISIBLE_DEVICES=<服务器分配的单卡编号> sh train.sh options/BEAR-LOLv2-syn.yml
-CUDA_VISIBLE_DEVICES=<服务器分配的单卡编号> sh train.sh options/BEAR-LOLv2-real.yml
-```
 
-每次切换 4090/5090 服务器后，先在目标服务器核对 `torch.__version__`、
-`torch.version.cuda`、driver，并执行一次真实 batch 的前向、反向及 AMP 冒烟。
-本项目没有自定义 CUDA 扩展；`batch_size_per_gpu`、worker 数和 AMP 策略可按
-服务器调整，但不得改动模型、损失、评价口径或 checkpoint 语义。
+
+
+
 
 ## Tensorboard
 
@@ -164,14 +147,7 @@ python test_lol.py --opt options/LOL-v2-syn.yml --weights pretrained_models/LOL-
 python test_lol.py --opt options/LOL-v2-syn.yml --weights pretrained_models/LOL-v2-syn.pth --save_comparison
 ```
 
-BEAR-BioIR 测试仍使用唯一入口 `test_lol.py`；默认按 64 的倍数右下反射补边，
-模型输出和指标计算前会恢复原图尺寸：
 
-```bash
-python test_lol.py --opt options/BEAR-LOLv1.yml --weights experiments/BEAR-BioIR-LOLv1/models/best_G.pth
-python test_lol.py --opt options/BEAR-LOLv2-syn.yml --weights experiments/BEAR-BioIR-LOLv2-syn/models/best_G.pth
-python test_lol.py --opt options/BEAR-LOLv2-real.yml --weights experiments/BEAR-BioIR-LOLv2-real/models/best_G.pth
-```
 
 
 
@@ -193,43 +169,66 @@ test_result/<实验名>/<数据集名>/
 训练
 
 ```
-sh train.sh options/LOL-v1.yml
+CUDA_VISIBLE_DEVICES=0 sh train.sh options/BEAR-LOLv1.yml
+```
+
+```
+# 查看当前错误链接
+ls -ld ./tf_dir
+readlink ./tf_dir
+
+# 只删除软连接
+unlink ./tf_dir
+
+# 重新建立正确链接
+ln -s "./BioIR-M/experiments/BEAR-BioIR-LOLv1/tb_looger" "./tf_dir"
+
+# 验证最终指向
+readlink -f ./tf_dir
+ls ./tf_dir
 ```
 
 测试
 
-- PSNR：
-- SSIM：
-- LPIPS：
-- 参数量(M)：
-- FLOPS(G)：
-
 ```
-# LOL-v1
-python test_lol.py --opt options/LOL-v1.yml --weights experiments/BioIR-LOLv1/models/latest_G.pth
+python test_lol.py --opt options/BEAR-LOLv1.yml --weights ./experiments/BEAR-BioIR-LOLv1/models/best_G.pth
 ```
 
+<img src="img/README_img/image-20260903212234348.png" alt="image-20260903212234348" style="zoom:67%;" />
 
+<img src="img/README_img/image-20260903212255751.png" alt="image-20260903212255751" style="zoom:80%;" />
 
 # LOLv2-real
 
 训练
 
 ```
-PYTHONPATH="$PWD" sh train.sh options/LOL-v2-real.yml
+CUDA_VISIBLE_DEVICES=0 sh train.sh options/BEAR-LOLv2-real.yml
+
+python test_lol.py --opt options/BEAR-LOLv2-real.yml --weights experiments/BEAR-BioIR-LOLv2-real/models/best_G.pth
+```
+
+```
+# 查看当前错误链接
+ls -ld ./tf_dir
+readlink ./tf_dir
+
+# 只删除软连接
+unlink ./tf_dir
+
+# 重新建立正确链接
+ln -s "./BioIR-M/experiments/BEAR-BioIR-LOLv2-real/tb_looger" "./tf_dir"
+
+
+# 验证最终指向
+readlink -f ./tf_dir
+ls ./tf_dir
 ```
 
 测试
 
-- PSNR：
-- SSIM：
-- LPIPS：
-- 参数量(M)：
-- FLOPS(G)：
-
 ```
-# LOL-v2-real
-python test_lol.py --opt options/LOL-v2-real.yml --weights experiments/BioIR-LOLv2-real/models/latest_G.pth
+python test_lol.py --opt options/BEAR-LOLv2-real.yml --weights experiments/BEAR-BioIR-LOLv2-real/models/best_G.pth
 ```
 
 
@@ -239,19 +238,12 @@ python test_lol.py --opt options/LOL-v2-real.yml --weights experiments/BioIR-LOL
 训练
 
 ```
-PYTHONPATH="$PWD" sh train.sh options/LOL-v2-syn.yml
+CUDA_VISIBLE_DEVICES=0 sh train.sh options/BEAR-LOLv2-syn.yml
 ```
 
 测试
 
-- PSNR：
-- SSIM：
-- LPIPS：
-- 参数量(M)：
-- FLOPS(G)：
-
 ```
-# LOL-v2-syn
-python test_lol.py --opt options/LOL-v2-syn.yml --weights experiments/BioIR-LOLv2-syn/models/latest_G.pth
+python test_lol.py --opt options/BEAR-LOLv2-syn.yml --weights experiments/BEAR-BioIR-LOLv2-syn/models/best_G.pth
 ```
 
