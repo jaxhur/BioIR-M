@@ -1,6 +1,6 @@
-# 方案 3：BEAR-BioIR 在 LOL-v1 的独立实验配置。
-name: BEAR-BioIR-LOLv1
-# 新模型类只在原 RGB L1/FFTLoss 之外加入 BEPR 的三项辅助监督。
+# 方案 3 v2：BEAR-BioIR 在 LOL-v1 的稠密结构细化实验配置。
+name: BEAR-BioIR-v2-LOLv1
+# 新实验名隔离 bear-v1 checkpoint，并加入 BEPR 与结构头辅助监督。
 model_type: BEARBioIRModel
 scale: 1
 num_gpu: 1
@@ -48,6 +48,9 @@ network_g:
   global_patch: 64
   attention_heads: 4
   topk: 16
+  structure_channels: 16
+  # 当前首版值为 0.1；正式训练前可用训练集 GT 非零 Sobel 的 P95 冻结替换。
+  structure_target_scale: 0.1
 
 path:
   pretrain_network_g:
@@ -74,11 +77,13 @@ train:
     type: FFTLoss
     loss_weight: 0.1
     reduction: mean
-  # 对应 L_b、L_scope、L_R；记录的是参与总损失求和后的加权值。
+  # 对应 L_b、L_scope、L_R、L_S；日志记录参与总损失求和后的加权值。
   routing_loss_opt:
     budget_weight: 0.05
     scope_weight: 0.01
     reliability_weight: 0.05
+    structure_weight: 0.05
+    structure_scale_weights: [1.0, 0.5, 0.25]
 
 val:
   val_freq: !!float 1e3

@@ -1,12 +1,14 @@
-"""实现 BEAR-BioIR 的范围预算—证据非对称路由恢复网络。
+"""实现 BEAR-BioIR v2 的范围路由与稠密结构细化恢复网络。
 
 本文件独立于原始 ``BioIR_arch.py``，以便 BioIR baseline 与方案 3 能在不同
 配置中直接对照。网络在入口将图像右侧、下侧反射补齐到 64 的倍数；所有
-BEPR 路由网格与 SARI token 都在该补边坐标系中构造，输出再裁回原始尺寸。
+BEPR 路由网格、结构预测和 SARI token 都在该补边坐标系中构造，输出再裁回
+原始尺寸。
 """
 
 from __future__ import annotations
 
+import math
 from typing import Dict, List, Tuple
 
 import torch
@@ -131,12 +133,198 @@ def topk_patch_mean(feature: torch.Tensor, patch_size: int,
                          width // patch_size)
 
 
+class FixedCIConvW(nn.Module):
+    """以固定 ``scale=0.9`` 的 CIConv-W 提取低光结构观测。
+
+    实现沿用 SG_LLIE 的 Gaussian color model 与 W invariant，但将尺度、
+    颜色矩阵和卷积核全部固定为 buffer。输出只作为结构预测头的输入，
+    不接受训练梯度，也不作为 GT 监督目标。
+    """
+
+    def __init__(self, scale: float = 0.9, k: float = 3.0) -> None:
+        """预计算 CIConv-W 的 15×15 Gaussian 基与一阶导数核。
+
+        Args:
+            scale: 对数尺度 ``s``，实际 Gaussian 标准差为 ``2**s``。
+            k: 按 ``k×sigma`` 截断卷积核的范围系数。
+        """
+        super().__init__()
+        if not math.isfinite(scale) or not -2.5 <= scale <= 2.5:
+            raise ValueError('CIConv scale must be finite and in [-2.5, 2.5]')
+        if not math.isfinite(k) or k <= 0:
+            raise ValueError('CIConv k must be a positive finite value')
+
+        sigma = float(2 ** scale)
+        radius = int(math.ceil(k * sigma + 0.5))
+        axis = torch.arange(-float(radius), float(radius) + 1)
+        grid_y, grid_x = torch.meshgrid(axis, axis, indexing='ij')
+        gaussian_base = torch.exp(-0.5 * (grid_x / sigma).square())
+        gaussian_base = gaussian_base * torch.exp(
+            -0.5 * (grid_y / sigma).square())
+        gaussian = gaussian_base / gaussian_base.sum()
+        derivative_x = (-grid_x / (sigma ** 3 * 2.0 * math.pi)
+                        * gaussian_base)
+        derivative_y = (-grid_y / (sigma ** 3 * 2.0 * math.pi)
+                        * gaussian_base)
+        derivative_x = derivative_x / derivative_x.abs().sum()
+        derivative_y = derivative_y / derivative_y.abs().sum()
+        kernels = torch.stack(
+            [gaussian, derivative_x, derivative_y], dim=0).unsqueeze(1)
+        color_matrix = torch.tensor([
+            [0.06, 0.63, 0.27],
+            [0.30, 0.04, -0.35],
+            [0.34, -0.60, 0.17],
+        ], dtype=torch.float32)
+        self.register_buffer('kernels', kernels, persistent=False)
+        self.register_buffer('color_matrix', color_matrix, persistent=False)
+        self.radius = radius
+
+    def forward(self, image: torch.Tensor) -> torch.Tensor:
+        """计算逐图标准化的 CIConv-W 单通道响应。
+
+        Args:
+            image: 值域为 ``[0,1]`` 的 ``B×3×H×W`` 浮点 RGB Tensor。
+
+        Returns:
+            与输入同设备、同 dtype 的 ``B×1×H×W`` 固定结构观测；返回值
+            不携带梯度图。
+        """
+        if image.ndim != 4 or image.shape[1] != 3:
+            raise ValueError(
+                f'CIConv-W expects Bx3xHxW input, got {tuple(image.shape)}')
+        if not image.is_floating_point():
+            raise TypeError('CIConv-W expects a floating-point input Tensor')
+
+        # CIConv 中的比值和对数在 AMP 下易溢出，固定使用 float32 计算。
+        with torch.autocast(device_type=image.device.type, enabled=False):
+            work = image.detach().to(dtype=torch.float32)
+            color_matrix = self.color_matrix.to(dtype=torch.float32)
+            kernels = self.kernels.to(dtype=torch.float32)
+            batch, _, height, width = work.shape
+            color = torch.einsum(
+                'ij,bjn->bin', color_matrix,
+                work.reshape(batch, 3, -1)).reshape(batch, 3, height, width)
+            branches = [
+                F.conv2d(channel, kernels, padding=self.radius)
+                for channel in color.split(1, dim=1)
+            ]
+            e, ex, ey = branches[0].split(1, dim=1)
+            _, elx, ely = branches[1].split(1, dim=1)
+            _, ellx, elly = branches[2].split(1, dim=1)
+            denominator = e + 1e-5
+            response = ((ex / denominator).square()
+                        + (ey / denominator).square()
+                        + (elx / denominator).square()
+                        + (ely / denominator).square()
+                        + (ellx / denominator).square()
+                        + (elly / denominator).square())
+            prior = F.instance_norm(torch.log(response + 1e-5), eps=1e-5)
+        return prior.to(dtype=image.dtype).detach()
+
+
+class StructureResidualUnit(nn.Module):
+    """执行一次 ``DWConv→GELU→1×1 Conv`` 稠密结构残差更新。"""
+
+    def __init__(self, channels: int) -> None:
+        """构造保持通道数和空间尺寸不变的轻量残差单元。
+
+        Args:
+            channels: 结构预测头的中间通道数。
+        """
+        super().__init__()
+        self.body = nn.Sequential(
+            nn.Conv2d(
+                channels, channels, kernel_size=3, padding=1,
+                groups=channels),
+            nn.GELU(),
+            nn.Conv2d(channels, channels, kernel_size=1),
+        )
+
+    def forward(self, feature: torch.Tensor) -> torch.Tensor:
+        """返回与输入同形状的结构残差特征。"""
+        return feature + self.body(feature)
+
+
+class DenseStructurePredictor(nn.Module):
+    """由低光 RGB 与固定 CIConv-W 观测预测完整分辨率结构图。"""
+
+    def __init__(self, channels: int = 16,
+                 target_scale: float = 0.10) -> None:
+        """构造方案 3 v2 的结构预测头与 GT 软 Sobel 目标生成器。
+
+        Args:
+            channels: 预测头中间特征通道数，方案默认 16。
+            target_scale: GT Sobel 强度归一化尺度 ``tau_S``。
+        """
+        super().__init__()
+        if channels <= 0:
+            raise ValueError('Structure predictor channels must be positive')
+        if not math.isfinite(target_scale) or target_scale <= 0:
+            raise ValueError('target_scale must be a positive finite value')
+        self.target_scale = float(target_scale)
+        self.ciconv = FixedCIConvW(scale=0.9, k=3.0)
+        self.input_projection = nn.Sequential(
+            nn.Conv2d(4, channels, kernel_size=3, padding=1),
+            nn.GELU(),
+        )
+        self.residual_units = nn.Sequential(
+            StructureResidualUnit(channels),
+            StructureResidualUnit(channels),
+        )
+        self.output_projection = nn.Conv2d(channels, 1, kernel_size=1)
+        sobel_x = torch.tensor([
+            [-1.0, 0.0, 1.0],
+            [-2.0, 0.0, 2.0],
+            [-1.0, 0.0, 1.0],
+        ], dtype=torch.float32).view(1, 1, 3, 3) / 8.0
+        self.register_buffer('target_sobel_x', sobel_x, persistent=False)
+        self.register_buffer(
+            'target_sobel_y', sobel_x.transpose(-1, -2).contiguous(),
+            persistent=False)
+
+    def forward(self, image: torch.Tensor) -> torch.Tensor:
+        """预测用于 SARI 发送采样与 refinement 的稠密结构图。
+
+        Args:
+            image: 补边后的 ``B×3×H_p×W_p`` 低光 RGB 图。
+
+        Returns:
+            值域为 ``(0,1)`` 的 ``B×1×H_p×W_p`` 结构预测。
+        """
+        ci_prior = self.ciconv(image)
+        feature = self.input_projection(torch.cat([image, ci_prior], dim=1))
+        feature = self.residual_units(feature)
+        return torch.sigmoid(self.output_projection(feature))
+
+    def build_target(self, gt: torch.Tensor) -> torch.Tensor:
+        """从 GT 的线性 Rec.709 亮度构造软 Sobel 结构监督。
+
+        Args:
+            gt: 与补边低光输入对齐的 ``B×3×H_p×W_p`` GT。
+
+        Returns:
+            按 ``tau_S`` 归一化并裁到 ``[0,1]`` 的稠密结构目标。该路径
+            仅供训练监督，不保留梯度。
+        """
+        with torch.autocast(device_type=gt.device.type, enabled=False):
+            luminance = rgb_to_luminance(gt.detach().to(dtype=torch.float32))
+            padded = F.pad(luminance, (1, 1, 1, 1), mode='reflect')
+            grad_x = F.conv2d(
+                padded, self.target_sobel_x.to(dtype=torch.float32))
+            grad_y = F.conv2d(
+                padded, self.target_sobel_y.to(dtype=torch.float32))
+            magnitude = torch.sqrt(
+                grad_x.square() + grad_y.square() + 1e-12)
+            target = (magnitude / self.target_scale).clamp(0.0, 1.0)
+        return target.to(dtype=gt.dtype).detach()
+
+
 class FixedStructureEvidence(nn.Module):
     """从低光 RGB 图生成无可学习参数的结构强度与方向一致性证据。
 
     高斯平滑、对数亮度、Sobel 梯度和结构张量完全依照方案 3 的固定观测
     路径实现。该模块不把 coherence 当作噪声真值；其输出只作为 BEPR 的
-    输入证据和 token 内结构加权的先验。
+    范围与区域可靠性输入证据。
     """
 
     def __init__(self, log_epsilon: float = 0.02,
@@ -278,7 +466,7 @@ class BEPR(nn.Module):
             image: 已被补到 64 倍数的 ``B×3×H_p×W_p`` 低光图。
 
         Returns:
-            包含整图范围预算、区域亮度/结构证据及 token 内发送先验的字典。
+            包含整图范围预算与区域亮度/结构证据的字典。
         """
         height, width = image.shape[-2:]
         if height % self.route_patch != 0 or width % self.route_patch != 0:
@@ -307,7 +495,6 @@ class BEPR(nn.Module):
             'budget': budget,
             'scope_base': scope_base,
             'reliability_base': reliability_base,
-            'sender_prior': structure['strength'] * structure['coherence'],
         }
 
     def route_scale(self, scale_index: int, feature: torch.Tensor,
@@ -394,6 +581,60 @@ class BEPR(nn.Module):
         }
 
 
+class StructureChannelRefinement(nn.Module):
+    """用稠密结构图在通道维细化 refinement 的 detail 特征。"""
+
+    def __init__(self, dim: int, bias: bool = False) -> None:
+        """构造结构引导的通道交叉注意力。
+
+        Args:
+            dim: refinement 特征通道数。
+            bias: 是否为结构交互卷积启用 bias。
+        """
+        super().__init__()
+
+        def projection(in_channels: int) -> nn.Sequential:
+            """构造 ``1×1 Conv + 3×3 DWConv`` 投影。"""
+            return nn.Sequential(
+                nn.Conv2d(in_channels, dim, kernel_size=1, bias=bias),
+                nn.Conv2d(
+                    dim, dim, kernel_size=3, padding=1, groups=dim,
+                    bias=bias),
+            )
+
+        self.query = projection(dim)
+        self.key = projection(1)
+        self.value = projection(1)
+        self.output = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
+        # 方案中的 kappa 采用可学习标量，初始 1 保持首轮关系不过度锐化。
+        self.temperature = nn.Parameter(torch.ones(1, 1, 1))
+
+    def forward(self, detail: torch.Tensor,
+                structure: torch.Tensor) -> torch.Tensor:
+        """将结构通道关系残差写回上下文更新后的 detail。
+
+        Args:
+            detail: ``B×C×H×W`` 的 ``D_ctx`` 特征。
+            structure: 同空间尺寸的 ``B×1×H×W`` 稠密结构预测。
+
+        Returns:
+            同时包含上下文与像素级结构的 ``D_ref`` 特征。
+        """
+        if structure.shape[:2] != (detail.shape[0], 1):
+            raise ValueError('Structure refinement expects Bx1xHxW guidance')
+        if structure.shape[-2:] != detail.shape[-2:]:
+            raise ValueError('Structure refinement guidance is not aligned')
+        batch, channels, height, width = detail.shape
+        query = F.normalize(self.query(detail).flatten(2), dim=-1)
+        key = F.normalize(self.key(structure).flatten(2), dim=-1)
+        value = self.value(structure).flatten(2)
+        attention = (query @ key.transpose(-2, -1)) * self.temperature
+        attention = attention.softmax(dim=-1)
+        message = (attention @ value).reshape(
+            batch, channels, height, width)
+        return detail + self.output(message)
+
+
 class SARIInteraction(nn.Module):
     """执行范围感知的上下文检索与可靠细节几何聚合。
 
@@ -404,7 +645,8 @@ class SARIInteraction(nn.Module):
 
     def __init__(self, dim: int, heads: int, route_patch: int,
                  global_patch: int, sender_temperature: float = 0.10,
-                 bias: bool = False) -> None:
+                 bias: bool = False,
+                 refine_with_structure: bool = False) -> None:
         """构造一个尺度无关、由 patch 参数对齐的 SARI 交互模块。
 
         Args:
@@ -414,6 +656,8 @@ class SARIInteraction(nn.Module):
             global_patch: 当前特征图中全局 token 的边长 ``p_g^s``。
             sender_temperature: token 内结构加权池化的 Softmax 温度。
             bias: 是否在卷积/线性投影中启用 bias。
+            refine_with_structure: 是否在上下文写入后增加结构通道交互；仅
+                四个完整分辨率 refinement SARI 启用。
         """
         super().__init__()
         if dim % heads != 0:
@@ -445,6 +689,9 @@ class SARIInteraction(nn.Module):
         self.detail_scale = nn.Parameter(torch.full((1, dim, 1, 1), 1e-2))
         self.context_scale = nn.Parameter(torch.full((1, dim, 1, 1), 1e-2))
         self.output_scale = nn.Parameter(torch.full((1, dim, 1, 1), 1e-2))
+        self.structure_refinement = (
+            StructureChannelRefinement(dim, bias=bias)
+            if refine_with_structure else None)
 
     @staticmethod
     def _tokens(feature: torch.Tensor, patch_size: int) -> torch.Tensor:
@@ -464,8 +711,8 @@ class SARIInteraction(nn.Module):
                                                grid_width)
 
     def _structure_weighted_tokens(self, detail: torch.Tensor,
-                                   sender_prior: torch.Tensor) -> torch.Tensor:
-        """在每个细节区域内用共享结构证据选择实际发送内容。
+                                   structure: torch.Tensor) -> torch.Tensor:
+        """在每个细节区域内用预测结构图选择实际发送内容。
 
         ``R_s`` 仍只决定区域是否有发送资格；该无参数池化只解决“Top-k
         可靠性标签很高但普通 PatchAvg 抹掉那条边缘”的 token 内容失配。
@@ -474,7 +721,7 @@ class SARIInteraction(nn.Module):
         route_height, route_width = (height // self.route_patch,
                                      width // self.route_patch)
         prior = F.interpolate(
-            sender_prior, size=(height, width), mode='area').clamp_min(0.0)
+            structure, size=(height, width), mode='area').clamp(0.0, 1.0)
         batch, channels = detail.shape[:2]
         pixels_per_token = self.route_patch * self.route_patch
         detail_patches = detail.reshape(
@@ -513,14 +760,14 @@ class SARIInteraction(nn.Module):
 
     def forward(self, feature: torch.Tensor, scope: torch.Tensor,
                 reliability: torch.Tensor,
-                sender_prior: torch.Tensor) -> torch.Tensor:
+                structure: torch.Tensor) -> torch.Tensor:
         """输出一个 SARI 残差消息，随后由 :class:`SARIBlock` 接入 GDFN。
 
         Args:
             feature: 当前尺度 ``B×C_s×H_s×W_s`` 的已归一化特征。
             scope: ``B×1×H_r×W_r`` 范围坐标图 ``A_s``。
             reliability: ``B×1×H_r×W_r`` 发送可靠性图 ``R_s``。
-            sender_prior: 由 BEPR 一次计算的像素级结构候选图。
+            structure: 结构预测头一次生成的像素级稠密结构图。
 
         Returns:
             与 ``feature`` 同形状的、LayerScale 抑制过的交互残差。
@@ -564,7 +811,7 @@ class SARIInteraction(nn.Module):
             detail_message, size=(height, width), mode='nearest')
         updated_detail = detail + self.detail_scale * self.detail_output(detail_message)
 
-        sender_tokens = self._structure_weighted_tokens(detail, sender_prior)
+        sender_tokens = self._structure_weighted_tokens(detail, structure)
         global_detail_message = self._aggregate_detail_to_global(
             sender_tokens, reliability, route_height, route_width)
         global_height = height // self.global_patch
@@ -575,7 +822,14 @@ class SARIInteraction(nn.Module):
             context_message, size=(height, width), mode='nearest')
         updated_context = context + self.context_scale * self.context_output(
             context_message)
-        return self.output_scale * self.fuse_output(updated_context * updated_detail)
+        detail_for_fusion = updated_detail
+        if self.structure_refinement is not None:
+            structure_at_scale = F.interpolate(
+                structure, size=(height, width), mode='area')
+            detail_for_fusion = self.structure_refinement(
+                updated_detail, structure_at_scale)
+        return self.output_scale * self.fuse_output(
+            updated_context * detail_for_fusion)
 
 
 class SARIBlock(nn.Module):
@@ -584,7 +838,8 @@ class SARIBlock(nn.Module):
     def __init__(self, dim: int, route_patch: int, global_patch: int,
                  heads: int = 4, ffn_expansion_factor: float = 3.0,
                  bias: bool = False,
-                 layer_norm_type: str = 'WithBias') -> None:
+                 layer_norm_type: str = 'WithBias',
+                 refine_with_structure: bool = False) -> None:
         """初始化通道归一化、SARI 交互和原 BioIR FeedForward。
 
         Args:
@@ -595,40 +850,43 @@ class SARIBlock(nn.Module):
             ffn_expansion_factor: 原 BioIR GDFN 的通道扩张倍数。
             bias: 是否为卷积和线性层启用 bias。
             layer_norm_type: 与原 BioIR 一致的 LayerNorm 类型。
+            refine_with_structure: 是否在 ``D_ctx`` 后执行结构通道交互。
         """
         super().__init__()
         self.norm1 = LayerNorm(dim, layer_norm_type)
         self.interaction = SARIInteraction(
-            dim, heads, route_patch, global_patch, bias=bias)
+            dim, heads, route_patch, global_patch, bias=bias,
+            refine_with_structure=refine_with_structure)
         self.norm2 = LayerNorm(dim, layer_norm_type)
         self.ffn = FeedForward(dim, ffn_expansion_factor, bias)
 
     def forward(self, feature: torch.Tensor, scope: torch.Tensor,
                 reliability: torch.Tensor,
-                sender_prior: torch.Tensor) -> torch.Tensor:
+                structure: torch.Tensor) -> torch.Tensor:
         """先写入 SARI 非对称消息，再执行未改动职责的原 GDFN。
 
         Args:
             feature: 当前尺度输入特征。
             scope: 该尺度共享的范围路由图 ``A_s``。
             reliability: 该尺度共享的可靠性图 ``R_s``。
-            sender_prior: 共享的像素级结构候选图。
+            structure: 共享的像素级稠密结构预测。
 
         Returns:
             SARI 和 GDFN 两次残差更新后的同形状恢复特征。
         """
         feature = feature + self.interaction(
-            self.norm1(feature), scope, reliability, sender_prior)
+            self.norm1(feature), scope, reliability, structure)
         return feature + self.ffn(self.norm2(feature))
 
 
 class BEARBioIR(nn.Module):
-    """方案 3 的 BioIR 主干：BEPR 路由器加 12 个 SARIBlock。
+    """方案 3 v2 主干：结构预测头、BEPR 与 12 个 SARIBlock。
 
     保留 BioIR 的三尺度 encoder–decoder、skip fusion、上/下采样、普通
     GDFN 和 RGB 残差输出。原始 12 个 ``AttBlock`` 被替换为 12 个独立参数
     的 ``SARIBlock``；同一尺度的 encoder/decoder 复用一次预测的 ``A_s``、
-    ``R_s``，一级路由同时供 4 个 refinement block 使用。
+    ``R_s``，一级路由同时供 4 个 refinement block 使用。稠密结构图用于
+    全部 block 的发送 token，并只在 4 个 refinement block 中额外交互。
     """
 
     def __init__(self, inp_channels: int = 3, out_channels: int = 3,
@@ -637,7 +895,8 @@ class BEARBioIR(nn.Module):
                  ffn_expansion_factor: float = 3.0, bias: bool = False,
                  route_channels: int = 8, route_patch: int = 16,
                  global_patch: int = 64, attention_heads: int = 4,
-                 topk: int = 16) -> None:
+                 topk: int = 16, structure_channels: int = 16,
+                 structure_target_scale: float = 0.10) -> None:
         """构造方案固定的 BioIR 三尺度恢复网络。
 
         Args:
@@ -653,6 +912,8 @@ class BEARBioIR(nn.Module):
             global_patch: 输入坐标全局区域边长，方案默认 64。
             attention_heads: SARI ``G→D`` 检索注意力头数。
             topk: 每个路由区域的结构/可靠性 Top-k 聚合数。
+            structure_channels: 稠密结构预测头的中间通道数。
+            structure_target_scale: GT 软 Sobel 目标的冻结尺度 ``tau_S``。
         """
         super().__init__()
         num_blocks = [1, 1, 2] if num_blocks is None else list(num_blocks)
@@ -670,8 +931,11 @@ class BEARBioIR(nn.Module):
         self.router = BEPR(
             scale_dims, route_channels=route_channels, route_patch=route_patch,
             topk=topk)
+        self.structure_predictor = DenseStructurePredictor(
+            channels=structure_channels, target_scale=structure_target_scale)
 
-        def make_blocks(scale: int, count: int) -> nn.ModuleList:
+        def make_blocks(scale: int, count: int,
+                        refine_with_structure: bool = False) -> nn.ModuleList:
             """创建同一尺度但不共享参数的一组 SARIBlock。"""
             downsample_factor = 2 ** scale
             return nn.ModuleList([
@@ -681,7 +945,9 @@ class BEARBioIR(nn.Module):
                     global_patch=global_patch // downsample_factor,
                     heads=attention_heads,
                     ffn_expansion_factor=ffn_expansion_factor,
-                    bias=bias) for _ in range(count)
+                    bias=bias,
+                    refine_with_structure=refine_with_structure)
+                for _ in range(count)
             ])
 
         self.encoder_level1 = make_blocks(0, num_blocks[0])
@@ -694,7 +960,8 @@ class BEARBioIR(nn.Module):
         self.decoder_level2 = make_blocks(1, num_blocks[1])
         self.up2_1 = Upsample(dim * 2)
         self.decoder_level1 = make_blocks(0, num_blocks[0])
-        self.refinement = make_blocks(0, num_refinement_blocks)
+        self.refinement = make_blocks(
+            0, num_refinement_blocks, refine_with_structure=True)
         self.fuse2 = Fuse(dim * 2)
         self.fuse1 = Fuse(dim)
         self.output = nn.Conv2d(dim, out_channels, kernel_size=3, padding=1,
@@ -703,11 +970,11 @@ class BEARBioIR(nn.Module):
     @staticmethod
     def _run_blocks(blocks: nn.ModuleList, feature: torch.Tensor,
                     route: Dict[str, torch.Tensor],
-                    sender_prior: torch.Tensor) -> torch.Tensor:
+                    structure: torch.Tensor) -> torch.Tensor:
         """让同一尺度所有 block 复用同一张 ``A_s``、``R_s`` 路由图。"""
         for block in blocks:
             feature = block(feature, route['scope'], route['reliability'],
-                            sender_prior)
+                            structure)
         return feature
 
     def build_routing_targets(self, low: torch.Tensor,
@@ -719,7 +986,7 @@ class BEARBioIR(nn.Module):
             gt: 与 ``low`` 同空间尺寸的配对 GT patch。
 
         Returns:
-            适配 BEPR 路由网格的预算和可靠性目标字典。
+            适配 BEPR 路由网格的预算、可靠性目标及完整分辨率结构目标。
         """
         padded_low, original_height, original_width = pad_to_multiple(
             low, self.pad_multiple)
@@ -728,48 +995,50 @@ class BEARBioIR(nn.Module):
         padded_gt = _reflect_pad_right_bottom(
             gt, padded_low.shape[-2] - original_height,
             padded_low.shape[-1] - original_width)
-        return self.router.build_targets(padded_low, padded_gt)
+        targets = self.router.build_targets(padded_low, padded_gt)
+        targets['structure'] = self.structure_predictor.build_target(padded_gt)
+        return targets
 
     def forward(self, inp_img: torch.Tensor,
                 return_aux: bool = False):
-        """执行一次 BEPR+SARI 前向，并在需要时返回训练辅助预测。
+        """执行一次结构预测、BEPR 与 SARI 前向并返回可选辅助量。
 
         Args:
             inp_img: ``B×3×H×W`` 低光 RGB 图像；测试可直接使用完整图。
-            return_aux: 为 ``True`` 时同时返回 ``b``、三尺度 ``A/R``，仅供
-                :class:`BEARBioIRModel` 计算训练期路由损失。
+            return_aux: 为 ``True`` 时同时返回结构图、``b`` 与三尺度
+                ``A/R``，仅供 :class:`BEARBioIRModel` 计算训练期辅助损失。
 
         Returns:
             默认仅返回裁回原尺寸的增强图；训练模式返回 ``(image, aux)``。
         """
         padded_input, original_height, original_width = pad_to_multiple(
             inp_img, self.pad_multiple)
+        structure = self.structure_predictor(padded_input)
         context = self.router.prepare(padded_input)
-        sender_prior = context['sender_prior']
 
         enc1_input = self.patch_embed(padded_input)
         route1 = self.router.route_scale(0, enc1_input, context, 1)
         enc1 = self._run_blocks(
-            self.encoder_level1, enc1_input, route1, sender_prior)
+            self.encoder_level1, enc1_input, route1, structure)
 
         enc2_input = self.down1_2(enc1)
         route2 = self.router.route_scale(1, enc2_input, context, 2)
         enc2 = self._run_blocks(
-            self.encoder_level2, enc2_input, route2, sender_prior)
+            self.encoder_level2, enc2_input, route2, structure)
 
         enc3_input = self.down2_3(enc2)
         route3 = self.router.route_scale(2, enc3_input, context, 4)
         enc3 = self._run_blocks(
-            self.encoder_level3, enc3_input, route3, sender_prior)
-        dec3 = self._run_blocks(self.decoder_level3, enc3, route3, sender_prior)
+            self.encoder_level3, enc3_input, route3, structure)
+        dec3 = self._run_blocks(self.decoder_level3, enc3, route3, structure)
 
         dec2_input = self.fuse2(self.up3_2(dec3), enc2)
         dec2 = self._run_blocks(
-            self.decoder_level2, dec2_input, route2, sender_prior)
+            self.decoder_level2, dec2_input, route2, structure)
         dec1_input = self.fuse1(self.up2_1(dec2), enc1)
         dec1 = self._run_blocks(
-            self.decoder_level1, dec1_input, route1, sender_prior)
-        refined = self._run_blocks(self.refinement, dec1, route1, sender_prior)
+            self.decoder_level1, dec1_input, route1, structure)
+        refined = self._run_blocks(self.refinement, dec1, route1, structure)
         restored = self.output(refined) + padded_input
         restored = restored[:, :, :original_height, :original_width]
 
@@ -777,6 +1046,7 @@ class BEARBioIR(nn.Module):
             return restored
         return restored, {
             'budget': context['budget'],
+            'structure': structure,
             'scopes': [route1['scope'], route2['scope'], route3['scope']],
             'reliabilities': [
                 route1['reliability'], route2['reliability'],

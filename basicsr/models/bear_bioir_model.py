@@ -1,4 +1,4 @@
-"""为 BEAR-BioIR 增加方案 3 路由监督的最小 BasicSR 训练适配层。"""
+"""为 BEAR-BioIR 增加路由与稠密结构监督的 BasicSR 训练适配层。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from basicsr.models.image_restoration_model import ImageRestorationModel
 
 
 class BEARBioIRModel(ImageRestorationModel):
-    """复用原 ImageRestorationModel，仅在训练时加入 BEPR 辅助损失。
+    """复用原 ImageRestorationModel，加入 BEPR 与结构头辅助损失。
 
     主恢复路径仍使用配置中的 RGB L1 和原 FFTLoss；本类不改写 BasicSR 的
     数据加载、优化器、scheduler、日志、验证、断点与 checkpoint 规则。
@@ -21,7 +21,7 @@ class BEARBioIRModel(ImageRestorationModel):
     """
 
     def __init__(self, opt: Dict) -> None:
-        """读取路由损失权重后初始化原 BasicSR 图像恢复模型。
+        """读取路由及结构损失权重后初始化原 BasicSR 图像恢复模型。
 
         Args:
             opt: BasicSR 解析后的实验配置，其中 ``routing_loss_opt`` 可选。
@@ -32,15 +32,57 @@ class BEARBioIRModel(ImageRestorationModel):
         self.scope_weight = float(routing_opt.get('scope_weight', 0.01))
         self.reliability_weight = float(
             routing_opt.get('reliability_weight', 0.05))
+        self.structure_weight = float(
+            routing_opt.get('structure_weight', 0.05))
+        self.structure_scale_weights = tuple(float(value) for value in
+                                             routing_opt.get(
+                                                 'structure_scale_weights',
+                                                 [1.0, 0.5, 0.25]))
+        if len(self.structure_scale_weights) != 3:
+            raise ValueError(
+                'structure_scale_weights must contain weights for 1x/2x/4x')
+        if any(value < 0 for value in self.structure_scale_weights):
+            raise ValueError('structure_scale_weights cannot be negative')
+        if sum(self.structure_scale_weights) <= 0:
+            raise ValueError('At least one structure scale weight must be positive')
 
-    def _routing_losses(self, aux: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """计算 ``L_b``、``L_scope`` 与 ``L_R`` 三项加权路由损失。
+    def _structure_loss(self, prediction: torch.Tensor,
+                        target: torch.Tensor) -> torch.Tensor:
+        """按 ``1×/2×/4×`` area 尺度计算归一化 SmoothL1。
 
         Args:
-            aux: 网络 ``return_aux=True`` 时输出的预算、范围和可靠性预测。
+            prediction: 结构头预测的 ``B×1×H_p×W_p`` 稠密结构图。
+            target: 由 GT 线性亮度生成、与预测对齐的软 Sobel 目标。
 
         Returns:
-            三项已经乘配置权重的标量 Tensor，名称可直接写入训练日志。
+            尚未乘 ``lambda_S`` 的多尺度结构监督标量。
+        """
+        if prediction.shape != target.shape:
+            raise ValueError(
+                f'Structure shapes differ: {prediction.shape} vs {target.shape}')
+        weighted_losses = []
+        for factor, weight in zip((1, 2, 4), self.structure_scale_weights):
+            if factor == 1:
+                scaled_prediction, scaled_target = prediction, target
+            else:
+                output_size = (prediction.shape[-2] // factor,
+                               prediction.shape[-1] // factor)
+                scaled_prediction = F.interpolate(
+                    prediction, size=output_size, mode='area')
+                scaled_target = F.interpolate(
+                    target, size=output_size, mode='area')
+            weighted_losses.append(
+                weight * F.smooth_l1_loss(scaled_prediction, scaled_target))
+        return sum(weighted_losses) / sum(self.structure_scale_weights)
+
+    def _routing_losses(self, aux: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """计算 ``L_b``、``L_scope``、``L_R`` 与 ``L_S`` 辅助损失。
+
+        Args:
+            aux: 网络 ``return_aux=True`` 时输出的结构、预算、范围和可靠性预测。
+
+        Returns:
+            四项已经乘配置权重的标量 Tensor，名称可直接写入训练日志。
         """
         bare_network = self.get_bare_model(self.net_g)
         # 目标路径只服务监督，不应保留梯度图或反向影响固定观测计算。
@@ -58,14 +100,17 @@ class BEARBioIRModel(ImageRestorationModel):
             for reliability in aux['reliabilities']
         ]
         reliability_loss = torch.stack(reliability_losses).mean()
+        structure_loss = self._structure_loss(
+            aux['structure'], targets['structure'])
         return {
             'l_budget': self.budget_weight * budget_loss,
             'l_scope': self.scope_weight * scope_loss,
             'l_reliability': self.reliability_weight * reliability_loss,
+            'l_structure': self.structure_weight * structure_loss,
         }
 
     def optimize_parameters(self, current_iter: int, tb_logger) -> None:
-        """以原恢复损失和方案 3 路由监督联合优化生成网络。
+        """以原恢复损失、路由监督和稠密结构监督联合优化生成网络。
 
         Args:
             current_iter: 当前 BasicSR global iteration，用于保持接口一致。
