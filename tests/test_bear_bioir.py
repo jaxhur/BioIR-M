@@ -1,6 +1,7 @@
 """验证 BEAR-BioIR v2 的路由、稠密结构与反向传播闭环。"""
 
 import unittest
+from collections import OrderedDict
 
 import torch
 import torch.nn.functional as F
@@ -8,6 +9,18 @@ import torch.nn.functional as F
 from basicsr.models.archs.BEAR_BioIR_arch import (
     BEARBioIR, DenseStructurePredictor, FixedCIConvW,
     StructureChannelRefinement)
+from basicsr.models.bear_bioir_model import BEARBioIRModel
+
+
+class FakeTensorBoardWriter:
+    """记录 ``add_image`` 调用，避免单元测试依赖真实事件文件。"""
+
+    def __init__(self):
+        self.images = []
+
+    def add_image(self, tag, image, global_step, dataformats):
+        """保存一次图片记录调用的标签、形状与迭代信息。"""
+        self.images.append((tag, image.clone(), global_step, dataformats))
 
 
 class TestBEARBioIR(unittest.TestCase):
@@ -96,6 +109,60 @@ class TestBEARBioIR(unittest.TestCase):
         with torch.no_grad():
             restored = model(low)
         self.assertEqual(restored.shape, low.shape)
+
+    def test_tensorboard_validation_visuals(self):
+        """验证 TensorBoard 记录五类图像并裁回原始空间尺寸。"""
+        wrapper = object.__new__(BEARBioIRModel)
+        wrapper.opt = {
+            'val': {
+                'val_freq': 1000,
+                'tensorboard_images': {
+                    'enabled': True,
+                    'interval': 1000,
+                    'max_samples': 1,
+                    'include_structure_target': True,
+                },
+            },
+        }
+        wrapper.net_g = BEARBioIR(
+            dim=8, num_blocks=[0, 0, 0], num_refinement_blocks=0,
+            attention_heads=4)
+        wrapper.lq = torch.rand(1, 3, 65, 67)
+        wrapper.gt = torch.rand(1, 3, 65, 67)
+        wrapper._collect_tensorboard_visuals = True
+        wrapper.test()
+
+        self.assertEqual(wrapper.output.shape, wrapper.lq.shape)
+        self.assertEqual(
+            wrapper.structure_prediction.shape, (1, 1, 65, 67))
+        visuals = OrderedDict([
+            ('lq', wrapper.lq.detach().cpu()),
+            ('result', wrapper.output.detach().cpu()),
+            ('gt', wrapper.gt.detach().cpu()),
+        ])
+        writer = FakeTensorBoardWriter()
+        wrapper._log_validation_images_to_tensorboard(
+            writer, 1000, 0, 'LOLv1-test', '1', visuals)
+
+        expected_tags = [
+            'validation/LOLv1-test/1/01_input_lq',
+            'validation/LOLv1-test/1/02_prediction',
+            'validation/LOLv1-test/1/03_ground_truth',
+            'validation/LOLv1-test/1/04_structure_prediction',
+            'validation/LOLv1-test/1/05_structure_target',
+        ]
+        self.assertEqual(
+            [record[0] for record in writer.images], expected_tags)
+        self.assertTrue(all(record[2] == 1000 for record in writer.images))
+        self.assertTrue(all(record[3] == 'CHW' for record in writer.images))
+        self.assertEqual(writer.images[3][1].shape, (1, 65, 67))
+        self.assertEqual(writer.images[4][1].shape, (1, 65, 67))
+
+        wrapper._log_validation_images_to_tensorboard(
+            writer, 1500, 0, 'LOLv1-test', '1', visuals)
+        wrapper._log_validation_images_to_tensorboard(
+            writer, 2000, 1, 'LOLv1-test', '2', visuals)
+        self.assertEqual(len(writer.images), 5)
 
 
 if __name__ == '__main__':

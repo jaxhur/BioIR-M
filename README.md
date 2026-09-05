@@ -166,6 +166,33 @@ test_result/<实验名>/<数据集名>/
 
 # LOLv1
 
+```
+CUDA_VISIBLE_DEVICES=0 sh train.sh options/BEAR-LOLv1.yml ; \
+CUDA_VISIBLE_DEVICES=0 sh train.sh options/BEAR-LOLv2-real.yml ; \
+CUDA_VISIBLE_DEVICES=0 sh train.sh options/BEAR-LOLv2-syn.yml
+```
+
+train_all.sh
+
+```
+#!/bin/bash
+
+set -e
+
+export CUDA_VISIBLE_DEVICES=0
+
+echo "===== Training LOLv1 ====="
+sh train.sh options/BEAR-LOLv1.yml
+
+echo "===== Training LOLv2-real ====="
+sh train.sh options/BEAR-LOLv2-real.yml
+
+echo "===== Training LOLv2-syn ====="
+sh train.sh options/BEAR-LOLv2-syn.yml
+
+echo "===== All training finished ====="
+```
+
 训练
 
 ```
@@ -182,6 +209,7 @@ unlink ./tf_dir
 
 # 重新建立正确链接
 ln -s "./BioIR-M/experiments/BEAR-BioIR-LOLv1/tb_looger" "./tf_dir"
+ln -s "./BioIR-M/experiments/BEAR-BioIR-v2-LOLv1/tb_looger" "./tf_dir"
 
 # 验证最终指向
 readlink -f ./tf_dir
@@ -204,8 +232,6 @@ python test_lol.py --opt options/BEAR-LOLv1.yml --weights ./experiments/BEAR-Bio
 
 ```
 CUDA_VISIBLE_DEVICES=0 sh train.sh options/BEAR-LOLv2-real.yml
-
-python test_lol.py --opt options/BEAR-LOLv2-real.yml --weights experiments/BEAR-BioIR-LOLv2-real/models/best_G.pth
 ```
 
 ```

@@ -310,6 +310,88 @@ class ImageRestorationModel(BaseModel):
             self.output = torch.cat(outs, dim=0)
         self.net_g.train()
 
+    def _should_log_validation_images(self, tb_logger, current_iter,
+                                      sample_index):
+        """判断当前验证样本是否需要写入 TensorBoard。
+
+        Args:
+            tb_logger: 训练入口创建的 TensorBoard writer，可为 ``None``。
+            current_iter: 当前 global iteration。
+            sample_index: 当前进程已经处理的验证样本序号，使用 0-based 计数。
+
+        Returns:
+            同时满足启用、迭代间隔和样本数量限制时返回 ``True``。
+        """
+        image_opt = self.opt.get('val', {}).get('tensorboard_images', {})
+        if tb_logger is None or not isinstance(image_opt, dict):
+            return False
+        if not image_opt.get('enabled', False):
+            return False
+        interval = int(image_opt.get(
+            'interval', self.opt['val'].get('val_freq', 1)))
+        max_samples = int(image_opt.get('max_samples', 1))
+        if interval <= 0:
+            raise ValueError('tensorboard_images.interval must be positive')
+        if max_samples < 0:
+            raise ValueError(
+                'tensorboard_images.max_samples cannot be negative')
+        return (current_iter % interval == 0
+                and sample_index < max_samples)
+
+    def get_tensorboard_validation_visuals(self, visuals):
+        """返回需要写入 TensorBoard 的验证可视化 Tensor。
+
+        子类可在不改变指标计算输入的前提下追加中间预测，例如结构图。
+
+        Args:
+            visuals: :meth:`get_current_visuals` 返回的验证图像字典。
+
+        Returns:
+            键名到 ``B×C×H×W`` 或 ``C×H×W`` Tensor 的映射。
+        """
+        return visuals
+
+    @staticmethod
+    def _prepare_tensorboard_image(image):
+        """把验证 Tensor 转为 TensorBoard 接受的 ``C×H×W`` 浮点图像。"""
+        if not torch.is_tensor(image):
+            return None
+        image = image.detach()
+        if image.ndim == 4:
+            if image.shape[0] == 0:
+                return None
+            image = image[0]
+        elif image.ndim == 2:
+            image = image.unsqueeze(0)
+        if image.ndim != 3 or image.shape[0] not in (1, 3):
+            return None
+        return image.float().cpu().clamp(0.0, 1.0)
+
+    def _log_validation_images_to_tensorboard(
+            self, tb_logger, current_iter, sample_index, dataset_name,
+            img_name, visuals):
+        """按稳定标签记录输入、恢复结果、GT 与可选中间预测。"""
+        if not self._should_log_validation_images(
+                tb_logger, current_iter, sample_index):
+            return
+        tensorboard_visuals = self.get_tensorboard_validation_visuals(
+            visuals)
+        visual_tags = OrderedDict([
+            ('lq', '01_input_lq'),
+            ('result', '02_prediction'),
+            ('gt', '03_ground_truth'),
+            ('structure_prediction', '04_structure_prediction'),
+            ('structure_target', '05_structure_target'),
+        ])
+        for key, tag_name in visual_tags.items():
+            image = self._prepare_tensorboard_image(
+                tensorboard_visuals.get(key))
+            if image is None:
+                continue
+            tag = f'validation/{dataset_name}/{img_name}/{tag_name}'
+            tb_logger.add_image(
+                tag, image, current_iter, dataformats='CHW')
+
     def dist_validation(self, dataloader, current_iter, tb_logger, save_img, rgb2bgr, use_image):
         dataset_name = dataloader.dataset.opt['name']
         with_metrics = self.opt['val'].get('metrics') is not None
@@ -332,6 +414,9 @@ class ImageRestorationModel(BaseModel):
             img_name = osp.splitext(osp.basename(val_data['lq_path'][0]))[0]
 
             self.feed_data(val_data, is_val=True)
+            self._collect_tensorboard_visuals = (
+                self._should_log_validation_images(
+                    tb_logger, current_iter, cnt))
             if self.opt['val'].get('grids', False):
                 self.grids()
 
@@ -344,6 +429,11 @@ class ImageRestorationModel(BaseModel):
             sr_img = tensor2img([visuals['result']], rgb2bgr=rgb2bgr)
             if 'gt' in visuals:
                 gt_img = tensor2img([visuals['gt']], rgb2bgr=rgb2bgr)
+            self._log_validation_images_to_tensorboard(
+                tb_logger, current_iter, cnt, dataset_name, img_name,
+                visuals)
+            self._collect_tensorboard_visuals = False
+            if 'gt' in visuals:
                 del self.gt
 
             # tentative for out of GPU memory

@@ -58,6 +58,11 @@ token 则由预测结构图在每个 patch 内加权得到。`D→G` 不执行�
 - 总损失在原 RGB L1、FFTLoss、`L_b`、`L_scope`、`L_R` 外新增 `L_S`。`L_S`
   对 `S_hat_l` 与 GT 软 Sobel 目标执行 `1×/2×/4×` area 多尺度 SmoothL1，
   尺度权重为 `[1,0.5,0.25]`，归一化后再乘 `lambda_S=0.05`。
+- 三套配置在每次 1000 iter 验证时，将验证集固定第 1 张样本写入 TensorBoard。
+  `Images` 面板按 `01_input_lq`、`02_prediction`、`03_ground_truth`、
+  `04_structure_prediction`、`05_structure_target` 展示低光输入、增强预测、
+  图像 GT、结构头预测和用于 `L_S` 的 GT 软 Sobel 目标；样本数与记录间隔可
+  通过 `val.tensorboard_images` 调整，默认只记录 1 张以控制验证开销。
 - 原项目的 `test_lol.py` 已按 RGB PSNR/SSIM、LPIPS-Alex-v0.1、THOP 的
   Params(M)/GMACs(G)/GFLOPs(G) 保存增强图和 `metric.csv`，本次没有重写它。
 

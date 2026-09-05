@@ -88,6 +88,12 @@ train:
 val:
   val_freq: !!float 1e3
   save_img: false
+  # 每次验证只跟踪固定的第 1 张图，避免图片事件显著拖慢完整验证。
+  tensorboard_images:
+    enabled: true
+    interval: 1000
+    max_samples: 1
+    include_structure_target: true
   metrics:
     psnr:
       type: calculate_psnr
