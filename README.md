@@ -208,9 +208,9 @@ readlink ./tf_dir
 unlink ./tf_dir
 
 # 重新建立正确链接
-ln -s "./BioIR-M/experiments/BEAR-BioIR-LOLv1/tb_looger" "./tf_dir"
 ln -s "./BioIR-M/experiments/BEAR-BioIR-v2-LOLv1/tb_looger" "./tf_dir"
-
+ln -s "./BioIR-M/experiments/BEAR-BioIR-v2-LOLv2-real/tb_looger" "./tf_dir"
+/openbayes/home/BioIR-M/experiments/BEAR-BioIR-v2-LOLv2-real/training_state
 # 验证最终指向
 readlink -f ./tf_dir
 ls ./tf_dir
@@ -218,8 +218,11 @@ ls ./tf_dir
 
 测试
 
+- psnr=22.3775, rgb_ssim=0.8508, lpips=0.1194] [complexity: params_m=1.8090, gmacs_g=17.1660, gflops_g=34.3320]
+
 ```
 python test_lol.py --opt options/BEAR-LOLv1.yml --weights ./experiments/BEAR-BioIR-LOLv1/models/best_G.pth
+python test_lol.py --opt options/BEAR-LOLv1.yml --weights ./experiments/BEAR-BioIR-v2-LOLv1/models/best_G.pth
 ```
 
 <img src="img/README_img/image-20260903212234348.png" alt="image-20260903212234348" style="zoom:67%;" />
@@ -254,7 +257,8 @@ ls ./tf_dir
 测试
 
 ```
-python test_lol.py --opt options/BEAR-LOLv2-real.yml --weights experiments/BEAR-BioIR-LOLv2-real/models/best_G.pth
+python test_lol.py --opt options/BEAR-LOLv2-real.yml --weights experiments/BEAR-BioIR-v2-LOLv2-real/models/best_G.pth
+/openbayes/home/BioIR-M/experiments/BEAR-BioIR-v2-LOLv2-real/models
 ```
 
 
@@ -270,6 +274,6 @@ CUDA_VISIBLE_DEVICES=0 sh train.sh options/BEAR-LOLv2-syn.yml
 测试
 
 ```
-python test_lol.py --opt options/BEAR-LOLv2-syn.yml --weights experiments/BEAR-BioIR-LOLv2-syn/models/best_G.pth
+python test_lol.py --opt options/BEAR-LOLv2-syn.yml --weights experiments/BEAR-BioIR-v2-LOLv2-syn/models/best_G.pth
 ```
 

@@ -48,6 +48,12 @@ network_g:
   global_patch: 64
   attention_heads: 4
   topk: 16
+  # 修改以下任一开关时必须同步修改顶层 name，避免自动续训串用其他组合。
+  # 结构来源：fixed=v1 的 strength×coherence；predicted=v2 的预测结构图。
+  structure_source: predicted
+  # 是否在 4 个完整分辨率 refinement block 中执行结构通道交叉注意力。
+  refine_with_structure: true
+  # 以下两项仅在 structure_source=predicted 时生效。
   structure_channels: 16
   # 当前首版值为 0.1；正式训练前可用训练集 GT 非零 Sobel 的 P95 冻结替换。
   structure_target_scale: 0.1
@@ -77,7 +83,7 @@ train:
     type: FFTLoss
     loss_weight: 0.1
     reduction: mean
-  # 对应 L_b、L_scope、L_R、L_S；日志记录参与总损失求和后的加权值。
+  # 固定结构模式仅计算前三项；预测结构模式再计算 L_S。
   routing_loss_opt:
     budget_weight: 0.05
     scope_weight: 0.01
@@ -93,6 +99,7 @@ val:
     enabled: true
     interval: 1000
     max_samples: 1
+    # 固定结构模式没有预测头，因此不会记录预测图与 GT 结构目标。
     include_structure_target: true
   metrics:
     psnr:

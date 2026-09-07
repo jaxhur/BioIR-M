@@ -1,4 +1,4 @@
-"""为 BEAR-BioIR 增加路由与稠密结构监督的 BasicSR 训练适配层。"""
+"""为 BEAR-BioIR 增加路由及可选稠密结构监督的 BasicSR 训练适配层。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from basicsr.models.image_restoration_model import ImageRestorationModel
 
 
 class BEARBioIRModel(ImageRestorationModel):
-    """复用原 ImageRestorationModel，加入 BEPR 与结构头辅助损失。
+    """复用原 ImageRestorationModel，加入 BEPR 与可选结构头辅助损失。
 
     主恢复路径仍使用配置中的 RGB L1 和原 FFTLoss；本类不改写 BasicSR 的
     数据加载、优化器、scheduler、日志、验证、断点与 checkpoint 规则。
@@ -76,13 +76,13 @@ class BEARBioIRModel(ImageRestorationModel):
         return sum(weighted_losses) / sum(self.structure_scale_weights)
 
     def _routing_losses(self, aux: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """计算 ``L_b``、``L_scope``、``L_R`` 与 ``L_S`` 辅助损失。
+        """计算三项路由损失，并在预测结构模式下计算 ``L_S``。
 
         Args:
             aux: 网络 ``return_aux=True`` 时输出的结构、预算、范围和可靠性预测。
 
         Returns:
-            四项已经乘配置权重的标量 Tensor，名称可直接写入训练日志。
+            已乘配置权重的标量 Tensor；固定结构模式不包含 ``l_structure``。
         """
         bare_network = self.get_bare_model(self.net_g)
         # 目标路径只服务监督，不应保留梯度图或反向影响固定观测计算。
@@ -100,17 +100,19 @@ class BEARBioIRModel(ImageRestorationModel):
             for reliability in aux['reliabilities']
         ]
         reliability_loss = torch.stack(reliability_losses).mean()
-        structure_loss = self._structure_loss(
-            aux['structure'], targets['structure'])
-        return {
+        losses = {
             'l_budget': self.budget_weight * budget_loss,
             'l_scope': self.scope_weight * scope_loss,
             'l_reliability': self.reliability_weight * reliability_loss,
-            'l_structure': self.structure_weight * structure_loss,
         }
+        if 'structure' in targets:
+            structure_loss = self._structure_loss(
+                aux['structure'], targets['structure'])
+            losses['l_structure'] = self.structure_weight * structure_loss
+        return losses
 
     def optimize_parameters(self, current_iter: int, tb_logger) -> None:
-        """以原恢复损失、路由监督和稠密结构监督联合优化生成网络。
+        """以恢复损失、路由监督和按配置启用的结构监督联合优化网络。
 
         Args:
             current_iter: 当前 BasicSR global iteration，用于保持接口一致。
@@ -155,8 +157,10 @@ class BEARBioIRModel(ImageRestorationModel):
         """
         was_training = self.net_g.training
         self.net_g.eval()
-        collect_structure = bool(getattr(
-            self, '_collect_tensorboard_visuals', False))
+        bare_network = self.get_bare_model(self.net_g)
+        collect_structure = (
+            bool(getattr(self, '_collect_tensorboard_visuals', False))
+            and bare_network.structure_predictor is not None)
         if hasattr(self, 'structure_prediction'):
             del self.structure_prediction
         with torch.no_grad():
@@ -190,8 +194,9 @@ class BEARBioIRModel(ImageRestorationModel):
         image_opt = self.opt.get('val', {}).get('tensorboard_images', {})
         include_target = (isinstance(image_opt, dict)
                           and image_opt.get('include_structure_target', True))
-        if include_target and hasattr(self, 'gt'):
-            bare_network = self.get_bare_model(self.net_g)
+        bare_network = self.get_bare_model(self.net_g)
+        if (include_target and hasattr(self, 'gt')
+                and bare_network.structure_predictor is not None):
             with torch.no_grad():
                 structure_target = (
                     bare_network.structure_predictor.build_target(self.gt))

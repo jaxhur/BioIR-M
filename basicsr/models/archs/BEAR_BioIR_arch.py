@@ -1,4 +1,4 @@
-"""实现 BEAR-BioIR v2 的范围路由与稠密结构细化恢复网络。
+"""实现 BEAR-BioIR 的范围路由与可配置结构引导恢复网络。
 
 本文件独立于原始 ``BioIR_arch.py``，以便 BioIR baseline 与方案 3 能在不同
 配置中直接对照。网络在入口将图像右侧、下侧反射补齐到 64 的倍数；所有
@@ -323,8 +323,8 @@ class FixedStructureEvidence(nn.Module):
     """从低光 RGB 图生成无可学习参数的结构强度与方向一致性证据。
 
     高斯平滑、对数亮度、Sobel 梯度和结构张量完全依照方案 3 的固定观测
-    路径实现。该模块不把 coherence 当作噪声真值；其输出只作为 BEPR 的
-    范围与区域可靠性输入证据。
+    路径实现。该模块不把 coherence 当作噪声真值；其输出既作为 BEPR 的
+    范围与区域可靠性输入证据，也可作为 SARI 的固定结构引导。
     """
 
     def __init__(self, log_epsilon: float = 0.02,
@@ -466,7 +466,7 @@ class BEPR(nn.Module):
             image: 已被补到 64 倍数的 ``B×3×H_p×W_p`` 低光图。
 
         Returns:
-            包含整图范围预算与区域亮度/结构证据的字典。
+            包含整图范围预算、区域亮度/结构证据及固定结构引导的字典。
         """
         height, width = image.shape[-2:]
         if height % self.route_patch != 0 or width % self.route_patch != 0:
@@ -495,6 +495,7 @@ class BEPR(nn.Module):
             'budget': budget,
             'scope_base': scope_base,
             'reliability_base': reliability_base,
+            'sender_prior': structure['strength'] * structure['coherence'],
         }
 
     def route_scale(self, scale_index: int, feature: torch.Tensor,
@@ -582,7 +583,7 @@ class BEPR(nn.Module):
 
 
 class StructureChannelRefinement(nn.Module):
-    """用稠密结构图在通道维细化 refinement 的 detail 特征。"""
+    """用所选稠密结构图在通道维细化 refinement 的 detail 特征。"""
 
     def __init__(self, dim: int, bias: bool = False) -> None:
         """构造结构引导的通道交叉注意力。
@@ -615,7 +616,7 @@ class StructureChannelRefinement(nn.Module):
 
         Args:
             detail: ``B×C×H×W`` 的 ``D_ctx`` 特征。
-            structure: 同空间尺寸的 ``B×1×H×W`` 稠密结构预测。
+            structure: 同空间尺寸的 ``B×1×H×W`` 稠密结构引导。
 
         Returns:
             同时包含上下文与像素级结构的 ``D_ref`` 特征。
@@ -712,7 +713,7 @@ class SARIInteraction(nn.Module):
 
     def _structure_weighted_tokens(self, detail: torch.Tensor,
                                    structure: torch.Tensor) -> torch.Tensor:
-        """在每个细节区域内用预测结构图选择实际发送内容。
+        """在每个细节区域内用所选结构图选择实际发送内容。
 
         ``R_s`` 仍只决定区域是否有发送资格；该无参数池化只解决“Top-k
         可靠性标签很高但普通 PatchAvg 抹掉那条边缘”的 token 内容失配。
@@ -767,7 +768,7 @@ class SARIInteraction(nn.Module):
             feature: 当前尺度 ``B×C_s×H_s×W_s`` 的已归一化特征。
             scope: ``B×1×H_r×W_r`` 范围坐标图 ``A_s``。
             reliability: ``B×1×H_r×W_r`` 发送可靠性图 ``R_s``。
-            structure: 结构预测头一次生成的像素级稠密结构图。
+            structure: 配置选定的固定先验或预测稠密结构图。
 
         Returns:
             与 ``feature`` 同形状的、LayerScale 抑制过的交互残差。
@@ -869,7 +870,7 @@ class SARIBlock(nn.Module):
             feature: 当前尺度输入特征。
             scope: 该尺度共享的范围路由图 ``A_s``。
             reliability: 该尺度共享的可靠性图 ``R_s``。
-            structure: 共享的像素级稠密结构预测。
+            structure: 共享的固定先验或预测稠密结构图。
 
         Returns:
             SARI 和 GDFN 两次残差更新后的同形状恢复特征。
@@ -880,13 +881,13 @@ class SARIBlock(nn.Module):
 
 
 class BEARBioIR(nn.Module):
-    """方案 3 v2 主干：结构预测头、BEPR 与 12 个 SARIBlock。
+    """方案 3 主干：可选结构来源、BEPR 与 12 个 SARIBlock。
 
     保留 BioIR 的三尺度 encoder–decoder、skip fusion、上/下采样、普通
     GDFN 和 RGB 残差输出。原始 12 个 ``AttBlock`` 被替换为 12 个独立参数
     的 ``SARIBlock``；同一尺度的 encoder/decoder 复用一次预测的 ``A_s``、
-    ``R_s``，一级路由同时供 4 个 refinement block 使用。稠密结构图用于
-    全部 block 的发送 token，并只在 4 个 refinement block 中额外交互。
+    ``R_s``，一级路由同时供 4 个 refinement block 使用。配置可独立选择
+    固定或预测结构图，并控制 4 个 refinement block 的结构通道交互。
     """
 
     def __init__(self, inp_channels: int = 3, out_channels: int = 3,
@@ -896,8 +897,10 @@ class BEARBioIR(nn.Module):
                  route_channels: int = 8, route_patch: int = 16,
                  global_patch: int = 64, attention_heads: int = 4,
                  topk: int = 16, structure_channels: int = 16,
-                 structure_target_scale: float = 0.10) -> None:
-        """构造方案固定的 BioIR 三尺度恢复网络。
+                 structure_target_scale: float = 0.10,
+                 structure_source: str = 'predicted',
+                 refine_with_structure: bool = True) -> None:
+        """构造结构来源与 refinement 交互均可配置的三尺度恢复网络。
 
         Args:
             inp_channels: 输入 RGB 通道数，方案固定为 3。
@@ -914,6 +917,10 @@ class BEARBioIR(nn.Module):
             topk: 每个路由区域的结构/可靠性 Top-k 聚合数。
             structure_channels: 稠密结构预测头的中间通道数。
             structure_target_scale: GT 软 Sobel 目标的冻结尺度 ``tau_S``。
+            structure_source: ``fixed`` 使用 ``strength×coherence``，
+                ``predicted`` 使用 v2 稠密结构预测图。
+            refine_with_structure: 是否在完整分辨率 refinement block 中执行
+                结构通道交叉注意力。
         """
         super().__init__()
         num_blocks = [1, 1, 2] if num_blocks is None else list(num_blocks)
@@ -923,16 +930,26 @@ class BEARBioIR(nn.Module):
             raise ValueError('BEAR-BioIR is defined for 3-channel RGB input/output')
         if global_patch != route_patch * 4:
             raise ValueError('Scheme 3 requires global_patch = 4 * route_patch')
+        if structure_source not in ('fixed', 'predicted'):
+            raise ValueError(
+                "structure_source must be either 'fixed' or 'predicted'")
+        if not isinstance(refine_with_structure, bool):
+            raise TypeError('refine_with_structure must be a bool')
         self.pad_multiple = int(global_patch)
         self.route_patch = int(route_patch)
         self.global_patch = int(global_patch)
+        self.structure_source = structure_source
+        self.refine_with_structure = refine_with_structure
         self.patch_embed = OverlapPatchEmbed(inp_channels, dim)
         scale_dims = (dim, dim * 2, dim * 4)
         self.router = BEPR(
             scale_dims, route_channels=route_channels, route_patch=route_patch,
             topk=topk)
-        self.structure_predictor = DenseStructurePredictor(
-            channels=structure_channels, target_scale=structure_target_scale)
+        self.structure_predictor = (
+            DenseStructurePredictor(
+                channels=structure_channels,
+                target_scale=structure_target_scale)
+            if structure_source == 'predicted' else None)
 
         def make_blocks(scale: int, count: int,
                         refine_with_structure: bool = False) -> nn.ModuleList:
@@ -961,7 +978,8 @@ class BEARBioIR(nn.Module):
         self.up2_1 = Upsample(dim * 2)
         self.decoder_level1 = make_blocks(0, num_blocks[0])
         self.refinement = make_blocks(
-            0, num_refinement_blocks, refine_with_structure=True)
+            0, num_refinement_blocks,
+            refine_with_structure=refine_with_structure)
         self.fuse2 = Fuse(dim * 2)
         self.fuse1 = Fuse(dim)
         self.output = nn.Conv2d(dim, out_channels, kernel_size=3, padding=1,
@@ -986,7 +1004,8 @@ class BEARBioIR(nn.Module):
             gt: 与 ``low`` 同空间尺寸的配对 GT patch。
 
         Returns:
-            适配 BEPR 路由网格的预算、可靠性目标及完整分辨率结构目标。
+            适配 BEPR 路由网格的预算、可靠性目标；预测结构模式下还包含
+            完整分辨率结构目标。
         """
         padded_low, original_height, original_width = pad_to_multiple(
             low, self.pad_multiple)
@@ -996,16 +1015,18 @@ class BEARBioIR(nn.Module):
             gt, padded_low.shape[-2] - original_height,
             padded_low.shape[-1] - original_width)
         targets = self.router.build_targets(padded_low, padded_gt)
-        targets['structure'] = self.structure_predictor.build_target(padded_gt)
+        if self.structure_predictor is not None:
+            targets['structure'] = self.structure_predictor.build_target(
+                padded_gt)
         return targets
 
     def forward(self, inp_img: torch.Tensor,
                 return_aux: bool = False):
-        """执行一次结构预测、BEPR 与 SARI 前向并返回可选辅助量。
+        """构造所选结构引导，执行 BEPR 与 SARI 并返回可选辅助量。
 
         Args:
             inp_img: ``B×3×H×W`` 低光 RGB 图像；测试可直接使用完整图。
-            return_aux: 为 ``True`` 时同时返回结构图、``b`` 与三尺度
+            return_aux: 为 ``True`` 时同时返回所选结构图、``b`` 与三尺度
                 ``A/R``，仅供 :class:`BEARBioIRModel` 计算训练期辅助损失。
 
         Returns:
@@ -1013,8 +1034,15 @@ class BEARBioIR(nn.Module):
         """
         padded_input, original_height, original_width = pad_to_multiple(
             inp_img, self.pad_multiple)
-        structure = self.structure_predictor(padded_input)
+        predicted_structure = (
+            self.structure_predictor(padded_input)
+            if self.structure_predictor is not None else None)
         context = self.router.prepare(padded_input)
+        structure = (context['sender_prior']
+                     if self.structure_source == 'fixed'
+                     else predicted_structure)
+        if structure is None:
+            raise RuntimeError('Predicted structure guidance is unavailable')
 
         enc1_input = self.patch_embed(padded_input)
         route1 = self.router.route_scale(0, enc1_input, context, 1)
