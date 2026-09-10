@@ -16,8 +16,8 @@ class BEARBioIRModel(ImageRestorationModel):
 
     主恢复路径仍使用配置中的 RGB L1 和原 FFTLoss；本类不改写 BasicSR 的
     数据加载、优化器、scheduler、日志、验证、断点与 checkpoint 规则。
-    预测阶段的 ``net_g`` 仍返回普通 RGB Tensor，因此 ``test_lol.py`` 无需
-    依赖训练期辅助输出。
+    默认预测路径的 ``net_g`` 仍返回普通 RGB Tensor；仅在测试脚本
+    显式导出结构预测图时请求辅助输出。
     """
 
     def __init__(self, opt: Dict) -> None:

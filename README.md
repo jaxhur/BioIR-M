@@ -19,7 +19,6 @@ python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda
 
 
 # 安装basicsr
-cd BioIR-M
 python -m pip install -e .
 # 旧版命令：python setup.py develop --no_cuda_ext
 # 验证
@@ -44,21 +43,24 @@ gdown "https://drive.google.com/uc?id=1mAN3ll5wWwt1Xz0C7uio31-NJu-50S8Z"
 # LOL-v2
 gdown "https://drive.google.com/uc?id=1L0UnJg6gZ4Eb7It2EuNxP0L3lQNmKMaP"
 
+
+# 解压
+unzip LOL-v1.zip -d LOL-v1
+unzip LOL-v2-renamed.zip -d LOL-v2
+
+rm LOL-v1.zip LOL-v2-renamed.zip
+cd ../
+```
+
+
+
+```
 #hyperai
 cp /openbayes/input/input0/LOL-v1.zip /openbayes/input/input0/LOL-v2-renamed.zip /openbayes/home/BioIR-M/datasets
 
 # AUtoDL
 cp /root/autodl-fs/LOL-v1.zip /root/BioIR/Single_Composite/datasets
 cp /root/autodl-fs/LOL-v2-renamed.zip /root/BioIR/Single_Composite/datasets
-
-# 解压
-cd /openbayes/home/BioIR-M
-cd ./datasets
-unzip LOL-v1.zip -d LOL-v1
-unzip LOL-v2-renamed.zip -d LOL-v2
-
-rm LOL-v1.zip LOL-v2-renamed.zip
-cd ../
 ```
 
 目录结构
@@ -222,7 +224,11 @@ ls ./tf_dir
 
 ```
 python test_lol.py --opt options/BEAR-LOLv1.yml --weights ./experiments/BEAR-BioIR-LOLv1/models/best_G.pth
+
 python test_lol.py --opt options/BEAR-LOLv1.yml --weights ./experiments/BEAR-BioIR-v2-LOLv1/models/best_G.pth
+python test_lol.py --opt options/BEAR-LOLv1.yml --weights ./experiments/BEAR-BioIR-v2-LOLv1-B/models/best_G.pth
+python test_lol.py --opt options/BEAR-LOLv1.yml --weights ./experiments/BEAR-BioIR-v2-LOLv1-C/models/best_G.pth
+python test_lol.py --opt options/BEAR-LOLv1.yml --weights ./experiments/BEAR-BioIR-v2-LOLv1-D/models/best_G.pth
 ```
 
 <img src="img/README_img/image-20260903212234348.png" alt="image-20260903212234348" style="zoom:67%;" />
@@ -258,7 +264,10 @@ ls ./tf_dir
 
 ```
 python test_lol.py --opt options/BEAR-LOLv2-real.yml --weights experiments/BEAR-BioIR-v2-LOLv2-real/models/best_G.pth
-/openbayes/home/BioIR-M/experiments/BEAR-BioIR-v2-LOLv2-real/models
+
+python test_lol.py --opt options/BEAR-LOLv2-real.yml --weights experiments/BEAR-BioIR-v2-LOLv2-real-B/models/best_G.pth
+python test_lol.py --opt options/BEAR-LOLv2-real.yml --weights experiments/BEAR-BioIR-v2-LOLv2-real-C/models/best_G.pth
+python test_lol.py --opt options/BEAR-LOLv2-real.yml --weights experiments/BEAR-BioIR-v2-LOLv2-real-D/models/best_G.pth
 ```
 
 
@@ -275,5 +284,9 @@ CUDA_VISIBLE_DEVICES=0 sh train.sh options/BEAR-LOLv2-syn.yml
 
 ```
 python test_lol.py --opt options/BEAR-LOLv2-syn.yml --weights experiments/BEAR-BioIR-v2-LOLv2-syn/models/best_G.pth
+
+python test_lol.py --opt options/BEAR-LOLv2-syn.yml --weights experiments/BEAR-BioIR-v2-LOLv2-syn-B/models/best_G.pth
+python test_lol.py --opt options/BEAR-LOLv2-syn.yml --weights experiments/BEAR-BioIR-v2-LOLv2-syn-C/models/best_G.pth
+python test_lol.py --opt options/BEAR-LOLv2-syn.yml --weights experiments/BEAR-BioIR-v2-LOLv2-syn-D/models/best_G.pth
 ```
 

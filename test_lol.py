@@ -84,6 +84,18 @@ def save_rgb(path, image):
         raise OSError(f'Could not write image: {path}')
 
 
+def save_grayscale(path, image):
+    """保存 uint8 单通道预测图，并按需创建父目录。"""
+    if image.ndim != 2 or image.dtype != np.uint8:
+        raise ValueError(
+            'Grayscale image must be a two-dimensional uint8 array, '
+            f'got shape={image.shape}, dtype={image.dtype}.')
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(path), image):
+        raise OSError(f'Could not write image: {path}')
+
+
 def center_label(image, text, height=28):
     """为可选对比图添加标题栏。"""
     label = np.zeros((height, image.shape[1], 3), dtype=np.uint8)
@@ -140,8 +152,20 @@ def load_model(opt, weights_path, device):
     return model
 
 
-def infer_one(model, image_rgb, device, factor):
-    """单次前向推理；只做反射补边，不缩放图像。"""
+def infer_one(model, image_rgb, device, factor, return_structure=False):
+    """单次前向推理，可选返回裁回原图尺寸的预测结构图。
+
+    Args:
+        model: 已加载权重并切换到 eval 模式的生成网络。
+        image_rgb: 值域为 ``[0,255]`` 的 ``H×W×3`` uint8 RGB 图像。
+        device: 模型当前使用的 ``torch.device``。
+        factor: 反射补边倍数，BEAR-BioIR 默认为 64。
+        return_structure: 是否在同一次前向中返回预测头结构图。
+
+    Returns:
+        默认返回增强 RGB 图像；开启 ``return_structure`` 时返回
+        ``(restored, structure)``，后者为 ``H×W`` uint8 单通道图。
+    """
     image = image_rgb.astype(np.float32) / 255.0
     tensor = torch.from_numpy(image).permute(2, 0, 1).unsqueeze(0).to(device)
     _, _, height, width = tensor.shape
@@ -151,12 +175,45 @@ def infer_one(model, image_rgb, device, factor):
         tensor = F.pad(
             tensor, (0, pad_width, 0, pad_height), mode='reflect')
     with torch.inference_mode():
-        restored = model(tensor)
+        structure = None
+        if return_structure:
+            bare_model = model.module if hasattr(model, 'module') else model
+            if getattr(bare_model, 'structure_predictor', None) is None:
+                raise ValueError(
+                    '--save_structure requires a checkpoint and YAML with '
+                    'network_g.structure_source=predicted.')
+            output = model(tensor, return_aux=True)
+            if not (isinstance(output, tuple) and len(output) == 2):
+                raise TypeError(
+                    'Structure export requires model(..., return_aux=True) '
+                    'to return (restored, aux).')
+            restored, aux = output
+            if not isinstance(aux, dict) or 'structure' not in aux:
+                raise KeyError(
+                    'Auxiliary model output does not contain "structure".')
+            structure = aux['structure']
+        else:
+            restored = model(tensor)
         if isinstance(restored, list):
             restored = restored[-1]
     restored = restored[:, :, :height, :width]
     restored = restored.clamp(0, 1).squeeze(0).permute(1, 2, 0)
-    return np.round(restored.cpu().numpy() * 255.0).astype(np.uint8)
+    restored_image = np.round(
+        restored.cpu().numpy() * 255.0).astype(np.uint8)
+    if not return_structure:
+        return restored_image
+
+    if (not torch.is_tensor(structure) or structure.ndim != 4
+            or structure.shape[0] != 1 or structure.shape[1] != 1):
+        shape = tuple(structure.shape) if torch.is_tensor(structure) else None
+        raise ValueError(
+            'Predicted structure must have shape 1x1xHxW, '
+            f'got {shape}.')
+    # 使用固定 [0,1] 标尺保存，不做逐图拉伸，便于比较预测幅值。
+    structure = structure[:, :, :height, :width].clamp(0, 1)
+    structure_image = torch.round(structure[0, 0] * 255.0)
+    structure_image = structure_image.to(torch.uint8).cpu().numpy()
+    return restored_image, structure_image
 
 
 def create_lpips_metric(device):
@@ -245,6 +302,11 @@ def main():
         '--factor', type=int, default=64,
         help='推理入口补边倍数；BEAR-BioIR 使用方案固定的 64。')
     parser.add_argument('--save_comparison', action='store_true')
+    parser.add_argument(
+        '--save_structure', action='store_true',
+        help=(
+            '保存 predicted 结构头的完整分辨率单通道预测图；'
+            '需要 structure_source=predicted。'))
     args = parser.parse_args()
 
     if args.device == 'auto':
@@ -263,6 +325,7 @@ def main():
         args.output_root, opt['name'], dataset_name)
     enhanced_dir = output_root / 'enhanced'
     comparison_dir = output_root / 'comparison'
+    structure_dir = output_root / 'structure_prediction'
     output_root.mkdir(parents=True, exist_ok=True)
     logger = get_file_logger('basicsr', str(output_root / 'test.log'))
 
@@ -281,13 +344,20 @@ def main():
     for lq_path, gt_path in tqdm(pairs, unit='image'):
         low = load_rgb(lq_path)
         gt = load_rgb(gt_path)
-        restored = infer_one(model, low, device, args.factor)
+        if args.save_structure:
+            restored, structure = infer_one(
+                model, low, device, args.factor, return_structure=True)
+        else:
+            restored = infer_one(model, low, device, args.factor)
         if restored.shape != gt.shape:
             raise ValueError(
                 f'Restored/GT shape mismatch for {lq_path}: '
                 f'{restored.shape} vs {gt.shape}')
         relative_path = lq_path.relative_to(lq_dir)
         save_rgb(enhanced_dir / relative_path.with_suffix('.png'), restored)
+        if args.save_structure:
+            save_grayscale(
+                structure_dir / relative_path.with_suffix('.png'), structure)
         if args.save_comparison:
             save_comparison(
                 comparison_dir / relative_path.with_suffix('.png'),
@@ -349,6 +419,9 @@ def main():
         f'gmacs_g={complexity["gmacs_g"]:.4f}, '
         f'gflops_g={complexity["gflops_g"]:.4f}]')
     logger.info(f'Enhanced images: {enhanced_dir.resolve()}')
+    if args.save_structure:
+        logger.info(
+            f'Structure predictions: {structure_dir.resolve()}')
     logger.info(f'Metrics CSV: {(output_root / "metric.csv").resolve()}')
 
 

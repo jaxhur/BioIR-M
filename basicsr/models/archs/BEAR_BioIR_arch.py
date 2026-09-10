@@ -1027,10 +1027,11 @@ class BEARBioIR(nn.Module):
         Args:
             inp_img: ``B×3×H×W`` 低光 RGB 图像；测试可直接使用完整图。
             return_aux: 为 ``True`` 时同时返回所选结构图、``b`` 与三尺度
-                ``A/R``，仅供 :class:`BEARBioIRModel` 计算训练期辅助损失。
+                ``A/R``，供训练期辅助损失和测试阶段结构图诊断使用。
 
         Returns:
-            默认仅返回裁回原尺寸的增强图；训练模式返回 ``(image, aux)``。
+            默认仅返回裁回原尺寸的增强图；开启
+            ``return_aux`` 时返回 ``(image, aux)``。
         """
         padded_input, original_height, original_width = pad_to_multiple(
             inp_img, self.pad_multiple)
