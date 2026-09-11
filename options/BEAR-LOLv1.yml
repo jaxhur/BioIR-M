@@ -52,7 +52,7 @@ network_g:
   # 结构来源：fixed=v1 的 strength×coherence；predicted=v2 的预测结构图。
   structure_source: predicted
   # 是否在 4 个完整分辨率 refinement block 中执行结构通道交叉注意力。
-  refine_with_structure: true
+  refine_with_structure: false
   # 以下两项仅在 structure_source=predicted 时生效。
   structure_channels: 16
   # 当前首版值为 0.1；正式训练前可用训练集 GT 非零 Sobel 的 P95 冻结替换。
