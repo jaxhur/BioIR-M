@@ -159,7 +159,7 @@ def infer_one(model, image_rgb, device, factor, return_structure=False):
         model: 已加载权重并切换到 eval 模式的生成网络。
         image_rgb: 值域为 ``[0,255]`` 的 ``H×W×3`` uint8 RGB 图像。
         device: 模型当前使用的 ``torch.device``。
-        factor: 反射补边倍数，BEAR-BioIR 默认为 64。
+        factor: 反射补边倍数，由命令行覆盖或 YAML 的 ``global_patch`` 解析。
         return_structure: 是否在同一次前向中返回预测头结构图。
 
     Returns:
@@ -275,6 +275,26 @@ def infer_dataset_name(option_name):
         f'Cannot infer dataset from option name {option_name!r}; use --dataset.')
 
 
+def resolve_inference_factor(opt, command_line_factor=None):
+    """从命令行覆盖或 YAML 的 ``global_patch`` 确定推理补边倍数。
+
+    Args:
+        opt: BasicSR 解析后的完整实验配置。
+        command_line_factor: 用户通过 ``--factor`` 显式给出的可选覆盖值。
+
+    Returns:
+        正整数补边倍数。旧 BioIR 配置没有 ``global_patch`` 时保留原默认 64。
+    """
+    factor = command_line_factor
+    if factor is None:
+        factor = opt.get('network_g', {}).get('global_patch', 64)
+    factor = int(factor)
+    if factor <= 0:
+        raise ValueError(
+            f'Inference padding factor must be positive, got {factor}')
+    return factor
+
+
 def write_csv(path, fieldnames, rows):
     """以 UTF-8 写入结构固定的 CSV。"""
     path = Path(path)
@@ -299,8 +319,9 @@ def main():
               'test_result/<实验名>/<数据集名>。'))
     parser.add_argument('--device', default='auto', choices=['auto', 'cuda', 'cpu'])
     parser.add_argument(
-        '--factor', type=int, default=64,
-        help='推理入口补边倍数；BEAR-BioIR 使用方案固定的 64。')
+        '--factor', type=int, default=None,
+        help=('推理入口补边倍数；默认读取 YAML 的 network_g.global_patch，'
+              '旧 BioIR 配置回退为 64。'))
     parser.add_argument('--save_comparison', action='store_true')
     parser.add_argument(
         '--save_structure', action='store_true',
@@ -317,6 +338,7 @@ def main():
         raise RuntimeError('CUDA was requested but is unavailable.')
 
     opt = parse(args.opt, is_train=False)
+    inference_factor = resolve_inference_factor(opt, args.factor)
     legacy_dataset = args.name if args.name in DATASET_SPLITS else None
     dataset_name = args.dataset or legacy_dataset or infer_dataset_name(
         opt['name'])
@@ -337,7 +359,8 @@ def main():
     pairs = make_pairs(lq_dir, gt_dir)
     logger.info(
         f'[{opt["name"]}][TEST] dataset={dataset_name}, pairs={len(pairs)}, '
-        f'device={device}, checkpoint={Path(args.weights).resolve()}')
+        f'device={device}, factor={inference_factor}, '
+        f'checkpoint={Path(args.weights).resolve()}')
 
     per_image_rows = []
     metric_values = {'psnr': [], 'ssim': [], 'lpips': []}
@@ -346,9 +369,9 @@ def main():
         gt = load_rgb(gt_path)
         if args.save_structure:
             restored, structure = infer_one(
-                model, low, device, args.factor, return_structure=True)
+                model, low, device, inference_factor, return_structure=True)
         else:
-            restored = infer_one(model, low, device, args.factor)
+            restored = infer_one(model, low, device, inference_factor)
         if restored.shape != gt.shape:
             raise ValueError(
                 f'Restored/GT shape mismatch for {lq_path}: '

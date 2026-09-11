@@ -22,6 +22,27 @@ token 则由预测结构图在每个 patch 内加权得到。`D→G` 不执行�
 而是在已知的 4×4 区域归属中做可靠性门控均值。四个 refinement SARI 在
 `D_ctx` 后通过通道交叉注意力写入稠密结构，得到 `D_ref` 再参与同步融合。
 
+## 消融实验开关
+
+为保持原 BioIR 和已经训练过的 BEAR 配置不变，消融能力只增加在独立的
+`BEAR_BioIR_arch.py` 中。网络现在支持以下 YAML 字段：
+
+- `routing_mode: constant|bepr`：M1 使用常数 `A/R`，其余 SARI 变体使用 BEPR；
+- `constant_scope`、`constant_reliability`：M1 默认分别为 `0.5`、`1.0`；
+- `sender_pooling: average|structure`：分别对应普通 PatchAvg 和预测结构图加权；
+- `enable_g_to_d`、`enable_d_to_g`：独立关闭两个方向的消息写回；
+- `route_patch`、`global_patch`、`topk`：控制区域粒度与稀疏聚合比例。
+
+当 `routing_mode=constant` 且发送使用 `average` 时，不创建 BEPR 和结构预测头，
+训练直接复用原 `ImageRestorationModel`，因此只计算 RGB L1 与 FFTLoss。M2 使用
+`BEARBioIRModel` 计算 `L_b`、`L_scope`、`L_R`，但不创建结构预测头。Ours 在 M2
+之上启用预测结构加权发送及 `lambda_S=0.05` 的 `L_S`。当前 C 版继续保持
+`refine_with_structure=false`，所以 Ours 的唯一新增变量是监督结构引导发送。
+
+单方向消融保留被关闭分支的参数，只跳过对应消息的计算与写回。由于训练入口使用
+单进程 DDP，这两份 YAML 显式设置 `find_unused_parameters: true`，避免未使用分支
+在第二次迭代触发 DDP 梯度归约错误。
+
 ## 为使方案可执行而明确的处理
 
 1. 方案正文的个别段落仅写 `R_2,R_3`，但总览、使用位置表和 `L_R` 公式要求
@@ -48,8 +69,9 @@ token 则由预测结构图在每个 patch 内加权得到。`D→G` 不执行�
 - 训练入口不变：`train.sh`。三套新增配置为
   `options/BEAR-LOLv1.yml`、`options/BEAR-LOLv2-syn.yml`、
   `options/BEAR-LOLv2-real.yml`。
-- 测试入口不变：`test_lol.py`。其默认推理补边已改为方案规定的 64 倍数；模型
-  内部也会保证直接调用时采用同一规则，输出和指标前裁回原图尺寸。
+- 测试入口不变：`test_lol.py`。其默认推理补边从 YAML 的
+  `network_g.global_patch` 读取，细/默认/粗三档分别使用 32、64、128；旧 BioIR
+  配置没有该字段时回退为 64。模型内部也采用对应规则，输出和指标前裁回原图尺寸。
 - 三套 v2 实验名分别为 `BEAR-BioIR-v2-LOLv1`、`BEAR-BioIR-v2-LOLv2-syn`、
   `BEAR-BioIR-v2-LOLv2-real`，不会覆盖 bear-v1 checkpoint。配置均为单卡
   `BatchSize=4`、训练 `PatchSize=256×256`、`total_iter=150000`、
@@ -65,6 +87,12 @@ token 则由预测结构图在每个 patch 内加权得到。`D→G` 不执行�
   通过 `val.tensorboard_images` 调整，默认只记录 1 张以控制验证开销。
 - 原项目的 `test_lol.py` 已按 RGB PSNR/SSIM、LPIPS-Alex-v0.1、THOP 的
   Params(M)/GMACs(G)/GFLOPs(G) 保存增强图和 `metric.csv`，本次没有重写它。
+- LOL-v1 消融配置为 `options/ablation_m0_lolv1.yml`、
+  `options/ablation_m1_lolv1.yml`、`options/ablation_m2_lolv1.yml`、
+  `options/ablation_ours_lolv1.yml`、`options/ablation_wo_g2d_lolv1.yml`、
+  `options/ablation_wo_d2g_lolv1.yml`、`options/sensitivity_fine_lolv1.yml`、
+  `options/sensitivity_coarse_lolv1.yml`。参数敏感性的默认档直接复用 Ours 配置，
+  不重复训练。
 
 ## 4090/5090 环境基线
 

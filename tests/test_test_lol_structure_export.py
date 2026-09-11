@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from test_lol import infer_one, save_grayscale
+from test_lol import infer_one, resolve_inference_factor, save_grayscale
 
 
 class FakePredictedModel(nn.Module):
@@ -77,6 +77,23 @@ class TestStructurePredictionExport(unittest.TestCase):
             loaded = cv2.imread(str(output_path), cv2.IMREAD_UNCHANGED)
 
         np.testing.assert_array_equal(loaded, image)
+
+    def test_inference_factor_uses_yaml_geometry(self):
+        """验证测试入口默认跟随每份消融 YAML 的 q_g，并允许命令行覆盖。"""
+        self.assertEqual(
+            resolve_inference_factor({'network_g': {'global_patch': 32}}), 32)
+        self.assertEqual(
+            resolve_inference_factor({'network_g': {'global_patch': 128}}),
+            128)
+        self.assertEqual(resolve_inference_factor({'network_g': {}}), 64)
+        self.assertEqual(
+            resolve_inference_factor(
+                {'network_g': {'global_patch': 32}},
+                command_line_factor=16),
+            16)
+        with self.assertRaises(ValueError):
+            resolve_inference_factor(
+                {'network_g': {'global_patch': 0}})
 
 
 if __name__ == '__main__':

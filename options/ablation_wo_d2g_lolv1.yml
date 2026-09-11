@@ -1,0 +1,96 @@
+# 单向消融：关闭 D→G 可靠细节写回，其余预测头、损失和 G→D 保持 Ours。
+name: BEAR-Ablation-WO-D2G-LOLv1
+model_type: BEARBioIRModel
+scale: 1
+num_gpu: 1
+manual_seed: 42
+# 关闭一条消息后保留的分支参数不参与前向，DDP 需检测未使用参数。
+find_unused_parameters: true
+
+datasets:
+  train:
+    name: LOLv1-train
+    type: PairedImageDataset
+    dataroot_gt: ./datasets/LOL-v1/our485/high
+    dataroot_lq: ./datasets/LOL-v1/our485/low
+    filename_tmpl: '{}'
+    io_backend: {type: disk}
+    gt_size: 256
+    use_flip: true
+    use_rot: true
+    use_shuffle: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 4
+    dataset_enlarge_ratio: 1
+    prefetch_mode: ~
+  val:
+    name: LOLv1-test
+    type: PairedImageDataset
+    dataroot_gt: ./datasets/LOL-v1/eval15/high
+    dataroot_lq: ./datasets/LOL-v1/eval15/low
+    filename_tmpl: '{}'
+    io_backend: {type: disk}
+
+network_g:
+  type: BEARBioIR
+  inp_channels: 3
+  out_channels: 3
+  dim: 32
+  num_blocks: [1, 1, 2]
+  num_refinement_blocks: 4
+  ffn_expansion_factor: 3
+  bias: false
+  route_channels: 8
+  route_patch: 16
+  global_patch: 64
+  attention_heads: 4
+  topk: 16
+  routing_mode: bepr
+  sender_pooling: structure
+  structure_source: predicted
+  refine_with_structure: false
+  enable_g_to_d: true
+  enable_d_to_g: false
+  structure_channels: 16
+  structure_target_scale: 0.1
+
+path:
+  pretrain_network_g:
+  strict_load_g:
+  resume_state:
+
+train:
+  optim_g:
+    type: AdamW
+    lr: !!float 1e-3
+    weight_decay: !!float 1e-3
+    betas: [0.9, 0.9]
+  scheduler:
+    type: TrueCosineAnnealingLR
+    T_max: 150000
+    eta_min: !!float 1e-7
+  total_iter: 150000
+  warmup_iter: -1
+  pixel_opt: {type: L1Loss, loss_weight: 1.0, reduction: mean}
+  fft_loss_opt: {type: FFTLoss, loss_weight: 0.1, reduction: mean}
+  routing_loss_opt:
+    budget_weight: 0.05
+    scope_weight: 0.01
+    reliability_weight: 0.05
+    structure_weight: 0.05
+    structure_scale_weights: [1.0, 0.5, 0.25]
+
+val:
+  val_freq: !!float 1e3
+  save_img: false
+  metrics:
+    psnr: {type: calculate_psnr, crop_border: 0, test_y_channel: false}
+    ssim: {type: calculate_ssim, crop_border: 0, test_y_channel: false, ssim3d: false}
+
+logger:
+  print_freq: 20
+  save_checkpoint_freq: !!float 1e3
+  use_tb_logger: true
+  wandb: {project: ~, resume_id: ~}
+
+dist_params: {backend: nccl, port: 29500}

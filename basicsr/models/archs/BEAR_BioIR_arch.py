@@ -9,7 +9,7 @@ BEPR 路由网格、结构预测和 SARI token 都在该补边坐标系中构造
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -647,7 +647,10 @@ class SARIInteraction(nn.Module):
     def __init__(self, dim: int, heads: int, route_patch: int,
                  global_patch: int, sender_temperature: float = 0.10,
                  bias: bool = False,
-                 refine_with_structure: bool = False) -> None:
+                 refine_with_structure: bool = False,
+                 sender_pooling: str = 'structure',
+                 enable_g_to_d: bool = True,
+                 enable_d_to_g: bool = True) -> None:
         """构造一个尺度无关、由 patch 参数对齐的 SARI 交互模块。
 
         Args:
@@ -659,12 +662,23 @@ class SARIInteraction(nn.Module):
             bias: 是否在卷积/线性投影中启用 bias。
             refine_with_structure: 是否在上下文写入后增加结构通道交互；仅
                 四个完整分辨率 refinement SARI 启用。
+            sender_pooling: ``average`` 使用普通 PatchAvg，``structure``
+                使用稠密结构图加权池化。
+            enable_g_to_d: 是否把全局/局部上下文消息写回 detail 分支。
+            enable_d_to_g: 是否把可靠细节聚合消息写回 context 分支。
         """
         super().__init__()
         if dim % heads != 0:
             raise ValueError(f'dim={dim} must be divisible by heads={heads}')
         if global_patch % route_patch != 0:
             raise ValueError('global_patch must be an integer multiple of route_patch')
+        if sender_pooling not in ('average', 'structure'):
+            raise ValueError(
+                "sender_pooling must be either 'average' or 'structure'")
+        if not isinstance(enable_g_to_d, bool):
+            raise TypeError('enable_g_to_d must be a bool')
+        if not isinstance(enable_d_to_g, bool):
+            raise TypeError('enable_d_to_g must be a bool')
         self.dim = int(dim)
         self.heads = int(heads)
         self.head_dim = dim // heads
@@ -672,6 +686,9 @@ class SARIInteraction(nn.Module):
         self.global_patch = int(global_patch)
         self.group_size = global_patch // route_patch
         self.sender_temperature = float(sender_temperature)
+        self.sender_pooling = sender_pooling
+        self.enable_g_to_d = enable_g_to_d
+        self.enable_d_to_g = enable_d_to_g
 
         self.context_projection = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
         self.detail_projection = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
@@ -737,6 +754,25 @@ class SARIInteraction(nn.Module):
         tokens = (detail_patches * weights).sum(dim=-1)
         return tokens.reshape(batch, route_height * route_width, channels)
 
+    def _sender_tokens(
+            self, detail: torch.Tensor,
+            structure: Optional[torch.Tensor]) -> torch.Tensor:
+        """按 YAML 选择普通 PatchAvg 或结构加权的发送 token。
+
+        Args:
+            detail: 当前尺度 ``B×C×H×W`` detail 特征。
+            structure: 可选的完整分辨率结构图；普通 PatchAvg 不读取该输入。
+
+        Returns:
+            ``B×N_r×C`` 的细节发送 token 序列。
+        """
+        if self.sender_pooling == 'average':
+            return self._tokens(detail, self.route_patch)
+        if structure is None:
+            raise ValueError(
+                'Structure sender pooling requires a structure guidance map')
+        return self._structure_weighted_tokens(detail, structure)
+
     def _aggregate_detail_to_global(self, sender_tokens: torch.Tensor,
                                     reliability: torch.Tensor,
                                     route_height: int,
@@ -761,14 +797,15 @@ class SARIInteraction(nn.Module):
 
     def forward(self, feature: torch.Tensor, scope: torch.Tensor,
                 reliability: torch.Tensor,
-                structure: torch.Tensor) -> torch.Tensor:
+                structure: Optional[torch.Tensor]) -> torch.Tensor:
         """输出一个 SARI 残差消息，随后由 :class:`SARIBlock` 接入 GDFN。
 
         Args:
             feature: 当前尺度 ``B×C_s×H_s×W_s`` 的已归一化特征。
             scope: ``B×1×H_r×W_r`` 范围坐标图 ``A_s``。
             reliability: ``B×1×H_r×W_r`` 发送可靠性图 ``R_s``。
-            structure: 配置选定的固定先验或预测稠密结构图。
+            structure: 配置选定的固定先验或预测稠密结构图；普通 PatchAvg
+                且不启用 refinement 结构交互时可为 ``None``。
 
         Returns:
             与 ``feature`` 同形状的、LayerScale 抑制过的交互残差。
@@ -786,45 +823,57 @@ class SARIInteraction(nn.Module):
 
         context = self.context_dw(self.context_projection(feature))
         detail = self.detail_dw(self.detail_projection(feature))
-        detail_tokens = self._tokens(detail, self.route_patch)
-        local_tokens = self._tokens(context, self.route_patch)
-        global_tokens = self._tokens(context, self.global_patch)
+        updated_detail = detail
+        if self.enable_g_to_d:
+            detail_tokens = self._tokens(detail, self.route_patch)
+            local_tokens = self._tokens(context, self.route_patch)
+            global_tokens = self._tokens(context, self.global_patch)
+            batch, route_count, _ = detail_tokens.shape
+            global_count = global_tokens.shape[1]
+            query = self.query(detail_tokens).reshape(
+                batch, route_count, self.heads, self.head_dim).transpose(1, 2)
+            key = self.key(global_tokens).reshape(
+                batch, global_count, self.heads, self.head_dim).transpose(1, 2)
+            value = self.value(global_tokens).reshape(
+                batch, global_count, self.heads, self.head_dim).transpose(1, 2)
+            attention = (query @ key.transpose(-2, -1)) * (
+                self.head_dim ** -0.5)
+            global_message = (
+                attention.softmax(dim=-1) @ value).transpose(1, 2)
+            global_message = global_message.reshape(
+                batch, route_count, self.dim)
+            local_message = self.local_value(local_tokens)
 
-        batch, route_count, _ = detail_tokens.shape
-        global_count = global_tokens.shape[1]
-        query = self.query(detail_tokens).reshape(
-            batch, route_count, self.heads, self.head_dim).transpose(1, 2)
-        key = self.key(global_tokens).reshape(
-            batch, global_count, self.heads, self.head_dim).transpose(1, 2)
-        value = self.value(global_tokens).reshape(
-            batch, global_count, self.heads, self.head_dim).transpose(1, 2)
-        attention = (query @ key.transpose(-2, -1)) * (self.head_dim ** -0.5)
-        global_message = (attention.softmax(dim=-1) @ value).transpose(1, 2)
-        global_message = global_message.reshape(batch, route_count, self.dim)
-        local_message = self.local_value(local_tokens)
+            scope_tokens = scope.flatten(2).transpose(1, 2)
+            local_weight = 2.0 * scope_tokens * (1.0 - scope_tokens)
+            global_weight = scope_tokens.square()
+            mixed_message = (local_weight * local_message
+                             + global_weight * global_message)
+            detail_message = self._grid(
+                mixed_message, route_height, route_width)
+            detail_message = F.interpolate(
+                detail_message, size=(height, width), mode='nearest')
+            updated_detail = detail + self.detail_scale * self.detail_output(
+                detail_message)
 
-        scope_tokens = scope.flatten(2).transpose(1, 2)
-        local_weight = 2.0 * scope_tokens * (1.0 - scope_tokens)
-        global_weight = scope_tokens.square()
-        mixed_message = local_weight * local_message + global_weight * global_message
-        detail_message = self._grid(mixed_message, route_height, route_width)
-        detail_message = F.interpolate(
-            detail_message, size=(height, width), mode='nearest')
-        updated_detail = detail + self.detail_scale * self.detail_output(detail_message)
-
-        sender_tokens = self._structure_weighted_tokens(detail, structure)
-        global_detail_message = self._aggregate_detail_to_global(
-            sender_tokens, reliability, route_height, route_width)
-        global_height = height // self.global_patch
-        global_width = width // self.global_patch
-        context_message = self._grid(
-            global_detail_message, global_height, global_width)
-        context_message = F.interpolate(
-            context_message, size=(height, width), mode='nearest')
-        updated_context = context + self.context_scale * self.context_output(
-            context_message)
+        updated_context = context
+        if self.enable_d_to_g:
+            sender_tokens = self._sender_tokens(detail, structure)
+            global_detail_message = self._aggregate_detail_to_global(
+                sender_tokens, reliability, route_height, route_width)
+            global_height = height // self.global_patch
+            global_width = width // self.global_patch
+            context_message = self._grid(
+                global_detail_message, global_height, global_width)
+            context_message = F.interpolate(
+                context_message, size=(height, width), mode='nearest')
+            updated_context = context + self.context_scale * self.context_output(
+                context_message)
         detail_for_fusion = updated_detail
         if self.structure_refinement is not None:
+            if structure is None:
+                raise ValueError(
+                    'Structure refinement requires a structure guidance map')
             structure_at_scale = F.interpolate(
                 structure, size=(height, width), mode='area')
             detail_for_fusion = self.structure_refinement(
@@ -840,7 +889,10 @@ class SARIBlock(nn.Module):
                  heads: int = 4, ffn_expansion_factor: float = 3.0,
                  bias: bool = False,
                  layer_norm_type: str = 'WithBias',
-                 refine_with_structure: bool = False) -> None:
+                 refine_with_structure: bool = False,
+                 sender_pooling: str = 'structure',
+                 enable_g_to_d: bool = True,
+                 enable_d_to_g: bool = True) -> None:
         """初始化通道归一化、SARI 交互和原 BioIR FeedForward。
 
         Args:
@@ -852,25 +904,31 @@ class SARIBlock(nn.Module):
             bias: 是否为卷积和线性层启用 bias。
             layer_norm_type: 与原 BioIR 一致的 LayerNorm 类型。
             refine_with_structure: 是否在 ``D_ctx`` 后执行结构通道交互。
+            sender_pooling: 细节发送 token 的池化方式。
+            enable_g_to_d: 是否启用 ``G→D`` 消息写回。
+            enable_d_to_g: 是否启用 ``D→G`` 消息写回。
         """
         super().__init__()
         self.norm1 = LayerNorm(dim, layer_norm_type)
         self.interaction = SARIInteraction(
             dim, heads, route_patch, global_patch, bias=bias,
-            refine_with_structure=refine_with_structure)
+            refine_with_structure=refine_with_structure,
+            sender_pooling=sender_pooling,
+            enable_g_to_d=enable_g_to_d,
+            enable_d_to_g=enable_d_to_g)
         self.norm2 = LayerNorm(dim, layer_norm_type)
         self.ffn = FeedForward(dim, ffn_expansion_factor, bias)
 
     def forward(self, feature: torch.Tensor, scope: torch.Tensor,
                 reliability: torch.Tensor,
-                structure: torch.Tensor) -> torch.Tensor:
+                structure: Optional[torch.Tensor]) -> torch.Tensor:
         """先写入 SARI 非对称消息，再执行未改动职责的原 GDFN。
 
         Args:
             feature: 当前尺度输入特征。
             scope: 该尺度共享的范围路由图 ``A_s``。
             reliability: 该尺度共享的可靠性图 ``R_s``。
-            structure: 共享的固定先验或预测稠密结构图。
+            structure: 可选的固定先验或预测稠密结构图。
 
         Returns:
             SARI 和 GDFN 两次残差更新后的同形状恢复特征。
@@ -881,13 +939,14 @@ class SARIBlock(nn.Module):
 
 
 class BEARBioIR(nn.Module):
-    """方案 3 主干：可选结构来源、BEPR 与 12 个 SARIBlock。
+    """方案 3 主干：可配置路由、双向消息与 12 个 SARIBlock。
 
     保留 BioIR 的三尺度 encoder–decoder、skip fusion、上/下采样、普通
     GDFN 和 RGB 残差输出。原始 12 个 ``AttBlock`` 被替换为 12 个独立参数
     的 ``SARIBlock``；同一尺度的 encoder/decoder 复用一次预测的 ``A_s``、
-    ``R_s``，一级路由同时供 4 个 refinement block 使用。配置可独立选择
-    固定或预测结构图，并控制 4 个 refinement block 的结构通道交互。
+    ``R_s``，一级路由同时供 4 个 refinement block 使用。消融配置可独立
+    切换常数/BEPR 路由、PatchAvg/结构加权发送、两个消息方向、结构来源，
+    并控制 4 个 refinement block 的结构通道交互。
     """
 
     def __init__(self, inp_channels: int = 3, out_channels: int = 3,
@@ -899,7 +958,13 @@ class BEARBioIR(nn.Module):
                  topk: int = 16, structure_channels: int = 16,
                  structure_target_scale: float = 0.10,
                  structure_source: str = 'predicted',
-                 refine_with_structure: bool = True) -> None:
+                 refine_with_structure: bool = True,
+                 routing_mode: str = 'bepr',
+                 constant_scope: float = 0.5,
+                 constant_reliability: float = 1.0,
+                 sender_pooling: str = 'structure',
+                 enable_g_to_d: bool = True,
+                 enable_d_to_g: bool = True) -> None:
         """构造结构来源与 refinement 交互均可配置的三尺度恢复网络。
 
         Args:
@@ -921,6 +986,13 @@ class BEARBioIR(nn.Module):
                 ``predicted`` 使用 v2 稠密结构预测图。
             refine_with_structure: 是否在完整分辨率 refinement block 中执行
                 结构通道交叉注意力。
+            routing_mode: ``bepr`` 预测 ``A/R``，``constant`` 使用固定值。
+            constant_scope: 固定路由模式下的范围值 ``A``。
+            constant_reliability: 固定路由模式下的可靠性值 ``R``。
+            sender_pooling: ``average`` 使用 PatchAvg，``structure`` 使用
+                预测或固定结构图加权发送 token。
+            enable_g_to_d: 是否启用所有 SARI 的 ``G→D`` 消息写回。
+            enable_d_to_g: 是否启用所有 SARI 的 ``D→G`` 消息写回。
         """
         super().__init__()
         num_blocks = [1, 1, 2] if num_blocks is None else list(num_blocks)
@@ -930,26 +1002,60 @@ class BEARBioIR(nn.Module):
             raise ValueError('BEAR-BioIR is defined for 3-channel RGB input/output')
         if global_patch != route_patch * 4:
             raise ValueError('Scheme 3 requires global_patch = 4 * route_patch')
+        if route_patch <= 0 or route_patch % 4 != 0:
+            raise ValueError('route_patch must be positive and divisible by 4')
         if structure_source not in ('fixed', 'predicted'):
             raise ValueError(
                 "structure_source must be either 'fixed' or 'predicted'")
         if not isinstance(refine_with_structure, bool):
             raise TypeError('refine_with_structure must be a bool')
+        if routing_mode not in ('bepr', 'constant'):
+            raise ValueError("routing_mode must be either 'bepr' or 'constant'")
+        if sender_pooling not in ('average', 'structure'):
+            raise ValueError(
+                "sender_pooling must be either 'average' or 'structure'")
+        if not isinstance(enable_g_to_d, bool):
+            raise TypeError('enable_g_to_d must be a bool')
+        if not isinstance(enable_d_to_g, bool):
+            raise TypeError('enable_d_to_g must be a bool')
+        if (not math.isfinite(constant_scope)
+                or not 0.0 <= constant_scope <= 1.0):
+            raise ValueError('constant_scope must be finite and in [0, 1]')
+        if (not math.isfinite(constant_reliability)
+                or not 0.0 <= constant_reliability <= 1.0):
+            raise ValueError(
+                'constant_reliability must be finite and in [0, 1]')
         self.pad_multiple = int(global_patch)
         self.route_patch = int(route_patch)
         self.global_patch = int(global_patch)
         self.structure_source = structure_source
         self.refine_with_structure = refine_with_structure
+        self.routing_mode = routing_mode
+        self.constant_scope = float(constant_scope)
+        self.constant_reliability = float(constant_reliability)
+        self.sender_pooling = sender_pooling
+        self.enable_g_to_d = enable_g_to_d
+        self.enable_d_to_g = enable_d_to_g
+        self.uses_structure_guidance = (
+            sender_pooling == 'structure' or refine_with_structure)
         self.patch_embed = OverlapPatchEmbed(inp_channels, dim)
         scale_dims = (dim, dim * 2, dim * 4)
-        self.router = BEPR(
-            scale_dims, route_channels=route_channels, route_patch=route_patch,
-            topk=topk)
+        self.router = (
+            BEPR(
+                scale_dims, route_channels=route_channels,
+                route_patch=route_patch, topk=topk)
+            if routing_mode == 'bepr' else None)
         self.structure_predictor = (
             DenseStructurePredictor(
                 channels=structure_channels,
                 target_scale=structure_target_scale)
-            if structure_source == 'predicted' else None)
+            if (self.uses_structure_guidance
+                and structure_source == 'predicted') else None)
+        self.fixed_structure = (
+            FixedStructureEvidence()
+            if (self.uses_structure_guidance
+                and structure_source == 'fixed'
+                and self.router is None) else None)
 
         def make_blocks(scale: int, count: int,
                         refine_with_structure: bool = False) -> nn.ModuleList:
@@ -963,7 +1069,10 @@ class BEARBioIR(nn.Module):
                     heads=attention_heads,
                     ffn_expansion_factor=ffn_expansion_factor,
                     bias=bias,
-                    refine_with_structure=refine_with_structure)
+                    refine_with_structure=refine_with_structure,
+                    sender_pooling=sender_pooling,
+                    enable_g_to_d=enable_g_to_d,
+                    enable_d_to_g=enable_d_to_g)
                 for _ in range(count)
             ])
 
@@ -988,12 +1097,38 @@ class BEARBioIR(nn.Module):
     @staticmethod
     def _run_blocks(blocks: nn.ModuleList, feature: torch.Tensor,
                     route: Dict[str, torch.Tensor],
-                    structure: torch.Tensor) -> torch.Tensor:
+                    structure: Optional[torch.Tensor]) -> torch.Tensor:
         """让同一尺度所有 block 复用同一张 ``A_s``、``R_s`` 路由图。"""
         for block in blocks:
             feature = block(feature, route['scope'], route['reliability'],
                             structure)
         return feature
+
+    def _constant_route(
+            self, feature: torch.Tensor,
+            downsample_factor: int) -> Dict[str, torch.Tensor]:
+        """为 M1 按当前尺度构造固定 ``A=0.5``、``R=1`` 路由图。
+
+        Args:
+            feature: 当前尺度 ``B×C×H×W`` 特征。
+            downsample_factor: 当前尺度相对输入的下采样倍率。
+
+        Returns:
+            与当前 SARI 路由网格对齐的常数 ``scope`` 和 ``reliability``。
+        """
+        patch_size = self.route_patch // downsample_factor
+        if patch_size <= 0:
+            raise ValueError('downsample_factor exceeds route_patch')
+        height, width = feature.shape[-2:]
+        if height % patch_size != 0 or width % patch_size != 0:
+            raise ValueError('Constant route grid is not aligned with feature')
+        shape = (feature.shape[0], 1, height // patch_size,
+                 width // patch_size)
+        return {
+            'scope': feature.new_full(shape, self.constant_scope),
+            'reliability': feature.new_full(
+                shape, self.constant_reliability),
+        }
 
     def build_routing_targets(self, low: torch.Tensor,
                               gt: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -1007,6 +1142,9 @@ class BEARBioIR(nn.Module):
             适配 BEPR 路由网格的预算、可靠性目标；预测结构模式下还包含
             完整分辨率结构目标。
         """
+        if self.router is None:
+            raise RuntimeError(
+                'Routing targets are unavailable when routing_mode=constant')
         padded_low, original_height, original_width = pad_to_multiple(
             low, self.pad_multiple)
         if gt.shape[-2:] != (original_height, original_width):
@@ -1026,8 +1164,8 @@ class BEARBioIR(nn.Module):
 
         Args:
             inp_img: ``B×3×H×W`` 低光 RGB 图像；测试可直接使用完整图。
-            return_aux: 为 ``True`` 时同时返回所选结构图、``b`` 与三尺度
-                ``A/R``，供训练期辅助损失和测试阶段结构图诊断使用。
+            return_aux: 为 ``True`` 时同时返回可选结构图、预算与三尺度
+                ``A/R``；常数路由且普通发送模式的结构图为 ``None``。
 
         Returns:
             默认仅返回裁回原尺寸的增强图；开启
@@ -1038,25 +1176,38 @@ class BEARBioIR(nn.Module):
         predicted_structure = (
             self.structure_predictor(padded_input)
             if self.structure_predictor is not None else None)
-        context = self.router.prepare(padded_input)
-        structure = (context['sender_prior']
-                     if self.structure_source == 'fixed'
-                     else predicted_structure)
-        if structure is None:
-            raise RuntimeError('Predicted structure guidance is unavailable')
+        context = (self.router.prepare(padded_input)
+                   if self.router is not None else None)
+        structure = None
+        if self.uses_structure_guidance:
+            if self.structure_source == 'predicted':
+                structure = predicted_structure
+            elif context is not None:
+                structure = context['sender_prior']
+            elif self.fixed_structure is not None:
+                fixed = self.fixed_structure(padded_input)
+                structure = fixed['strength'] * fixed['coherence']
+            if structure is None:
+                raise RuntimeError('Configured structure guidance is unavailable')
 
         enc1_input = self.patch_embed(padded_input)
-        route1 = self.router.route_scale(0, enc1_input, context, 1)
+        route1 = (self.router.route_scale(0, enc1_input, context, 1)
+                  if self.router is not None
+                  else self._constant_route(enc1_input, 1))
         enc1 = self._run_blocks(
             self.encoder_level1, enc1_input, route1, structure)
 
         enc2_input = self.down1_2(enc1)
-        route2 = self.router.route_scale(1, enc2_input, context, 2)
+        route2 = (self.router.route_scale(1, enc2_input, context, 2)
+                  if self.router is not None
+                  else self._constant_route(enc2_input, 2))
         enc2 = self._run_blocks(
             self.encoder_level2, enc2_input, route2, structure)
 
         enc3_input = self.down2_3(enc2)
-        route3 = self.router.route_scale(2, enc3_input, context, 4)
+        route3 = (self.router.route_scale(2, enc3_input, context, 4)
+                  if self.router is not None
+                  else self._constant_route(enc3_input, 4))
         enc3 = self._run_blocks(
             self.encoder_level3, enc3_input, route3, structure)
         dec3 = self._run_blocks(self.decoder_level3, enc3, route3, structure)
@@ -1073,8 +1224,11 @@ class BEARBioIR(nn.Module):
 
         if not return_aux:
             return restored
+        budget = (context['budget'] if context is not None
+                  else restored.new_full(
+                      (restored.shape[0], 1), self.constant_scope))
         return restored, {
-            'budget': context['budget'],
+            'budget': budget,
             'structure': structure,
             'scopes': [route1['scope'], route2['scope'], route3['scope']],
             'reliabilities': [

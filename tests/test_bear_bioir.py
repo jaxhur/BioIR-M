@@ -10,8 +10,8 @@ import yaml
 
 from basicsr.models.archs import define_network
 from basicsr.models.archs.BEAR_BioIR_arch import (
-    BEARBioIR, DenseStructurePredictor, FixedCIConvW,
-    StructureChannelRefinement)
+    BEARBioIR, DenseStructurePredictor, FixedCIConvW, SARIInteraction,
+    StructureChannelRefinement, pad_to_multiple)
 from basicsr.models.bear_bioir_model import BEARBioIRModel
 
 
@@ -131,15 +131,83 @@ class TestBEARBioIR(unittest.TestCase):
                         'l_structure' in routing_losses,
                         structure_source == 'predicted')
 
+    def test_constant_route_and_average_sender_for_m1(self):
+        """验证 M1 不创建 BEPR/结构头，并严格使用常数 A/R 与 PatchAvg。"""
+        model = BEARBioIR(
+            dim=8, num_blocks=[1, 0, 0], num_refinement_blocks=0,
+            attention_heads=4, routing_mode='constant',
+            constant_scope=0.5, constant_reliability=1.0,
+            sender_pooling='average', structure_source='fixed',
+            refine_with_structure=False).eval()
+        low = torch.rand(1, 3, 64, 64)
+        with torch.no_grad():
+            restored, aux = model(low, return_aux=True)
+
+        self.assertIsNone(model.router)
+        self.assertIsNone(model.structure_predictor)
+        self.assertIsNone(aux['structure'])
+        self.assertEqual(restored.shape, low.shape)
+        for scope, reliability in zip(
+                aux['scopes'], aux['reliabilities']):
+            torch.testing.assert_close(scope, torch.full_like(scope, 0.5))
+            torch.testing.assert_close(
+                reliability, torch.ones_like(reliability))
+        with self.assertRaises(RuntimeError):
+            model.build_routing_targets(low, low)
+
+    def test_sender_pooling_and_direction_switches(self):
+        """验证发送池化与两个消息方向能独立切换且保持输出形状。"""
+        detail = torch.arange(8 * 8, dtype=torch.float32).reshape(
+            1, 1, 8, 8).repeat(1, 4, 1, 1)
+        structure = torch.zeros(1, 1, 8, 8)
+        structure[:, :, 1::2, 1::2] = 1.0
+        average_interaction = SARIInteraction(
+            dim=4, heads=1, route_patch=2, global_patch=8,
+            sender_pooling='average')
+        structure_interaction = SARIInteraction(
+            dim=4, heads=1, route_patch=2, global_patch=8,
+            sender_pooling='structure')
+        average_tokens = average_interaction._sender_tokens(detail, None)
+        structure_tokens = structure_interaction._sender_tokens(
+            detail, structure)
+        torch.testing.assert_close(
+            average_tokens, average_interaction._tokens(detail, 2))
+        self.assertFalse(torch.allclose(average_tokens, structure_tokens))
+
+        low = torch.rand(1, 3, 64, 64)
+        for enable_g_to_d, enable_d_to_g in ((False, True), (True, False)):
+            with self.subTest(
+                    enable_g_to_d=enable_g_to_d,
+                    enable_d_to_g=enable_d_to_g):
+                model = BEARBioIR(
+                    dim=8, num_blocks=[1, 0, 0],
+                    num_refinement_blocks=0, attention_heads=4,
+                    enable_g_to_d=enable_g_to_d,
+                    enable_d_to_g=enable_d_to_g).eval()
+                with torch.no_grad():
+                    restored = model(low)
+                self.assertEqual(restored.shape, low.shape)
+                interaction = model.encoder_level1[0].interaction
+                self.assertIs(interaction.enable_g_to_d, enable_g_to_d)
+                self.assertIs(interaction.enable_d_to_g, enable_d_to_g)
+
     def test_invalid_structure_configuration_is_rejected(self):
         """验证错误的结构来源或非布尔 refinement 开关会立即报错。"""
         with self.assertRaises(ValueError):
             BEARBioIR(structure_source='unknown')
         with self.assertRaises(TypeError):
             BEARBioIR(refine_with_structure='true')
+        with self.assertRaises(ValueError):
+            BEARBioIR(routing_mode='unknown')
+        with self.assertRaises(ValueError):
+            BEARBioIR(sender_pooling='unknown')
+        with self.assertRaises(TypeError):
+            BEARBioIR(enable_g_to_d='false')
+        with self.assertRaises(ValueError):
+            BEARBioIR(route_patch=10, global_patch=40)
 
     def test_lol_yaml_defaults_keep_current_v2_behavior(self):
-        """验证三套 LOL YAML 均能构建当前 v2 默认组合。"""
+        """验证三套 LOL YAML 均能构建当前 C 版默认组合。"""
         option_directory = Path(__file__).resolve().parents[1] / 'options'
         option_names = (
             'BEAR-LOLv1.yml',
@@ -155,12 +223,103 @@ class TestBEARBioIR(unittest.TestCase):
                 self.assertEqual(
                     network_options['structure_source'], 'predicted')
                 self.assertIs(
-                    network_options['refine_with_structure'], True)
+                    network_options['refine_with_structure'], False)
                 network = define_network(network_options)
                 self.assertIsNotNone(network.structure_predictor)
                 self.assertTrue(all(
-                    block.interaction.structure_refinement is not None
+                    block.interaction.structure_refinement is None
                     for block in network.refinement))
+
+    def test_ablation_yaml_matrix(self):
+        """逐项核对八份 YAML 的实验隔离、开关和共同训练口径。"""
+        option_directory = Path(__file__).resolve().parents[1] / 'options'
+        expected = {
+            'ablation_m0_lolv1.yml': {
+                'model_type': 'ImageRestorationModel',
+                'network_type': 'BioIR',
+            },
+            'ablation_m1_lolv1.yml': {
+                'model_type': 'ImageRestorationModel',
+                'routing_mode': 'constant',
+                'sender_pooling': 'average',
+            },
+            'ablation_m2_lolv1.yml': {
+                'model_type': 'BEARBioIRModel',
+                'routing_mode': 'bepr',
+                'sender_pooling': 'average',
+            },
+            'ablation_ours_lolv1.yml': {
+                'model_type': 'BEARBioIRModel',
+                'routing_mode': 'bepr',
+                'sender_pooling': 'structure',
+            },
+            'ablation_wo_g2d_lolv1.yml': {
+                'model_type': 'BEARBioIRModel',
+                'enable_g_to_d': False,
+                'enable_d_to_g': True,
+            },
+            'ablation_wo_d2g_lolv1.yml': {
+                'model_type': 'BEARBioIRModel',
+                'enable_g_to_d': True,
+                'enable_d_to_g': False,
+            },
+            'sensitivity_fine_lolv1.yml': {
+                'route_patch': 8,
+                'global_patch': 32,
+                'topk': 4,
+            },
+            'sensitivity_coarse_lolv1.yml': {
+                'route_patch': 32,
+                'global_patch': 128,
+                'topk': 64,
+            },
+        }
+        experiment_names = set()
+        for option_name, assertions in expected.items():
+            with self.subTest(option_name=option_name):
+                with (option_directory / option_name).open(
+                        'r', encoding='utf-8') as option_file:
+                    options = yaml.safe_load(option_file)
+                network_options = options['network_g']
+                experiment_names.add(options['name'])
+                self.assertEqual(options['datasets']['train']['gt_size'], 256)
+                self.assertEqual(
+                    options['datasets']['train']['batch_size_per_gpu'], 4)
+                self.assertEqual(options['train']['total_iter'], 150000)
+                self.assertEqual(options['logger']['print_freq'], 20)
+                self.assertEqual(options['val']['val_freq'], 1000.0)
+                self.assertIs(
+                    options['val']['metrics']['ssim']['ssim3d'], False)
+                for key, value in assertions.items():
+                    if key == 'model_type':
+                        actual = options['model_type']
+                    elif key == 'network_type':
+                        actual = network_options['type']
+                    else:
+                        actual = network_options[key]
+                    self.assertEqual(actual, value)
+
+                if option_name.startswith('ablation_wo_'):
+                    self.assertIs(options['find_unused_parameters'], True)
+                if network_options['type'] == 'BEARBioIR':
+                    network = define_network(dict(network_options))
+                    self.assertEqual(
+                        network.global_patch, 4 * network.route_patch)
+        self.assertEqual(len(experiment_names), len(expected))
+
+    def test_sensitivity_padding_matches_plan(self):
+        """验证三档 q_g 对 LOL-v1 400×600 完整图得到计划中的补边尺寸。"""
+        image = torch.zeros(1, 3, 400, 600)
+        expected_sizes = {
+            32: (416, 608),
+            64: (448, 640),
+            128: (512, 640),
+        }
+        for global_patch, expected_size in expected_sizes.items():
+            with self.subTest(global_patch=global_patch):
+                padded, height, width = pad_to_multiple(image, global_patch)
+                self.assertEqual((height, width), (400, 600))
+                self.assertEqual(padded.shape[-2:], expected_size)
 
     def test_soft_sobel_target_and_structure_refinement(self):
         """验证 GT 软结构目标及 refinement 通道交互的梯度连接。"""
