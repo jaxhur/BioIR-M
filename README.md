@@ -154,6 +154,33 @@ python test_lol.py --opt options/LOL-v2-syn.yml --weights pretrained_models/LOL-
 python test_lol.py --opt options/LOL-v2-syn.yml --weights pretrained_models/LOL-v2-syn.pth --save_comparison
 ```
 
+## 路由行为可视化（无需重新训练）
+
+默认读取 YAML 中的 `datasets.val.dataroot_lq`，对完整测试集逐图执行一次前向，
+直接复用训练完成的 BEAR-BioIR 权重：
+
+```bash
+python visualize_bear_routing.py \
+  --opt options/BEAR-LOLv1.yml \
+  --weights experiments/BEAR-BioIR-v2-LOLv1/models/best_G.pth
+```
+
+默认输出到
+`analysis_artifacts/routing_behavior/<实验名>/<图片相对路径>/`，每张图包含
+低光输入、最终增强结果、`A_1/A_2/A_3` 范围图、`R_1/R_2/R_3` 可靠性图、
+预测结构图 `S_hat`、3×3 总览图、原始 `.npz` 数组、统计 CSV 和复现实验
+元数据。实验根目录另存 `routing_dataset_statistics.csv`，汇总整个测试集每张
+图的预算及各路由图均值、标准差。
+
+如只需重跑一张代表图，可额外传入：
+
+```bash
+--image datasets/LOL-v1/eval15/low/1.png
+```
+
+`A/R/S_hat` 均按统一的 `[0,1]` 标尺保存，不进行逐图 min-max 拉伸；区域级
+`A/R` 使用最近邻展开到输入尺寸，避免可视化插值制造模型并未预测的平滑边界。
+
 
 
 
@@ -293,5 +320,39 @@ python test_lol.py --opt options/BEAR-LOLv2-syn.yml --weights experiments/BEAR-B
 python test_lol.py --opt options/BEAR-LOLv2-syn.yml --weights experiments/BEAR-BioIR-v2-LOLv2-syn-B/models/best_G.pth
 python test_lol.py --opt options/BEAR-LOLv2-syn.yml --weights experiments/BEAR-BioIR-v2-LOLv2-syn-C/models/best_G.pth
 python test_lol.py --opt options/BEAR-LOLv2-syn.yml --weights experiments/BEAR-BioIR-v2-LOLv2-syn-D/models/best_G.pth
+```
+
+
+
+# 可视化\(A_s\)、\(R_s\)、\(\widehat S_l\) 
+
+
+
+```
+# 单图
+python visualize_bear_routing.py --opt options/BEAR-LOLv1.yml --weights experiments/BEAR-BioIR-v2-LOLv1/models/best_G.pth --image datasets/LOL-v1/eval15/low/1.png
+
+# 整个测试集
+python visualize_bear_routing.py --opt options/BEAR-LOLv1.yml --weights experiments/BEAR-BioIR-v2-LOLv1/models/best_G.pth --input-dir datasets/LOL-v1/eval15/low
+```
+
+默认产物目录：
+
+```
+analysis_artifacts/routing_behavior/<实验名>/<图片名>/
+├── input_low.png
+├── enhanced.png
+├── A_1.png
+├── A_2.png
+├── A_3.png
+├── R_1.png
+├── R_2.png
+├── R_3.png
+├── S_hat.png
+├── heatmaps/
+├── routing_overview.png
+├── routing_arrays.npz
+├── routing_statistics.csv
+└── metadata.json
 ```
 
