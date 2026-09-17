@@ -3,6 +3,7 @@
 创建环境：
 
 ```
+conda init
 git clone https://github.com/jaxhur/BioIR-M.git
 
 cd BioIR-M
@@ -13,7 +14,11 @@ conda activate bear-bioir
 
 # 安装依赖
 pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+
 pip install opencv-python lmdb tqdm einops scipy scikit-image tensorboard natsort pyiqa joblib lpips ptflops scikit-learn pandas thop
+pip install -i https://pypi.tuna.tsinghua.edu.cn/simple opencv-python lmdb tqdm einops scipy scikit-image tensorboard natsort pyiqa joblib lpips ptflops scikit-learn pandas thop
+
 
 python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
 
