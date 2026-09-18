@@ -330,10 +330,14 @@ python test_lol.py --opt options/BEAR-LOLv2-syn.yml --weights experiments/BEAR-B
 
 ```
 # 单图
-python visualize_bear_routing.py --opt options/BEAR-LOLv1.yml --weights experiments/BEAR-BioIR-v2-LOLv1/models/best_G.pth --image datasets/LOL-v1/eval15/low/1.png
+python visualize_bear_routing.py --opt options/BEAR-LOLv1.yml --weights 1best_G.pth --image datasets/LOL-v1/eval15/low/1.png
 
 # 整个测试集
-python visualize_bear_routing.py --opt options/BEAR-LOLv1.yml --weights experiments/BEAR-BioIR-v2-LOLv1/models/best_G.pth --input-dir datasets/LOL-v1/eval15/low
+python visualize_bear_routing.py --opt options/BEAR-LOLv1.yml --weights 1best_G.pth --input-dir datasets/LOL-v1/eval15/low
+
+python visualize_bear_routing.py --opt options/BEAR-LOLv2-real.yml --weights 2best_G.pth --input-dir datasets/LOL-v2/Real_captured/Test/Low
+
+python visualize_bear_routing.py --opt options/BEAR-LOLv2-syn.yml --weights 22best_G.pth --input-dir datasets/LOL-v2/Synthetic/Test/Low
 ```
 
 默认产物目录：
